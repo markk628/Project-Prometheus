@@ -4,8 +4,8 @@ import numpy as np
 from typing import Any, Dict, Optional
 
 from src.config.config import DATA_DIR, MODELS_DIR, INITIAL_BALANCE, TRANSACTION_FEE_PERCENT, WINDOW_SIZE
-from src.environment.environment import Environment
-from src.model.agent import Agent
+from src.v1.environment.environment import Environment
+from src.v1.model.agent import Agent
 from src.utils.logger import Logger
 from src.utils.utils import create_directory, save_to_csv, load_stock_data
 
