@@ -1,3 +1,5 @@
-/src/config/apikeys.py
+__pycache__/
 /data
 /models
+/results
+/src/config/.env
