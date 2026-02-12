@@ -263,11 +263,12 @@ class Environment:
         #     reward = 0
         
         portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
-        # transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
-        # position_penalty = 0.0001 * abs(self.shares_held)
-        transaction_penalty = ((self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value) * 0.1
-        position_fraction = (self.shares_held * self._get_current_price()) / current_portfolio_value
-        position_penalty = 0.001 * abs(position_fraction)
+        transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
+        position_penalty = 0.0001 * abs(self.shares_traded)
+        
+        # transaction_penalty = ((self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value) * 0.1
+        # position_fraction = (self.shares_traded * self._get_current_price()) / current_portfolio_value
+        # position_penalty = 0.001 * abs(position_fraction)
 
         
         reward = portfolio_return - transaction_penalty - position_penalty

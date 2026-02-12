@@ -148,7 +148,7 @@ def main():
     action_dim = 1
     env = Environment(data=test_data)
     
-    model_path = f"{MODELS_DIR}/final_sac_model_20260211_183254"
+    model_path = f"{MODELS_DIR}/final_sac_model_20260212_185446"
     agent = Agent(
         action_dim=action_dim,
         input_shape=(env.window_size, env.feature_dim),
