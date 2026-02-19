@@ -378,11 +378,13 @@ def main():
     train_env = Environment(data=train_data)
     valid_env = Environment(data=valid_data)
     
-    action_dim = 1
+    action_dim = train_env.action_space.shape[0]
+    portfolio_dim = train_env.observation_space['portfolio_state'].shape[0]
     
     agent = Agent(
         action_dim=action_dim,
-        input_shape=(train_env.window_size, train_env.feature_dim)
+        input_shape=(train_env.window_size, train_env.feature_dim),
+        portfolio_state_len=portfolio_dim
     )
     
     trainer = Trainer(

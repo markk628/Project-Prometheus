@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 from src.config.config import MODELS_DIR, BATCH_SIZE, HIDDEN_DIM, LEARNING_RATE_ACTOR, LEARNING_RATE_CRITIC, LEARNING_RATE_ALPHA, GAMMA, TAU, ALPHA_INIT, TARGET_UPDATE_INTERVAL, DEVICE, REPLAY_BUFFER_SIZE
+from src.v1.environment.environment import Environment
 from src.v1.model.networks import Actor, Critic
-from src.v1.model.replay_buffer import ReplayBuffer
+from src.v1.model.replay_buffer import UniformReplayBuffer
 from src.utils.logger import Logger
-from src.utils.utils import create_directory
+from src.utils.utils import create_directory, load_stock_data
 
 class Agent:
     def __init__(
@@ -29,6 +30,7 @@ class Agent:
         device: torch.device=DEVICE,
         buffer_capacity: int=REPLAY_BUFFER_SIZE,
         input_shape: Tuple[int, int]=None,
+        portfolio_state_len: int=None,
         logger: Optional[Logger]=None
     ):
         self.action_dim = action_dim
@@ -75,7 +77,12 @@ class Agent:
         else:
             self.alpha = torch.tensor(alpha_init, device=device)
         
-        self.replay_buffer = ReplayBuffer(capacity=buffer_capacity)
+        self.replay_buffer = UniformReplayBuffer(
+            observation_shape=input_shape,
+            portfolio_state_len=portfolio_state_len,
+            action_dim=action_dim,
+            capacity=buffer_capacity,
+        )
         
         self.train_step_counter = 0
         
@@ -92,13 +99,21 @@ class Agent:
             else:
                 state_tensor[key] = value.unsqueeze(0).to(self.device)
         
-        if validate:
-            _, _, action = self.actor.sample(state_tensor)
-        else:
-            action, _, _ = self.actor.sample(state_tensor)
+        with torch.no_grad():
+            if validate:
+                _, _, action = self.actor.sample(state_tensor)
+            else:
+                action, _, _ = self.actor.sample(state_tensor)
         
-        return action.detach().cpu().numpy()[0]
+        return action.cpu().numpy()[0]
     
+    def _batch_dict_to_tensor(self, state_dict: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
+        """Convert dict of batched numpy arrays to dict of tensors on device."""
+        return {
+            k: torch.as_tensor(v, dtype=torch.float, device=self.device)
+            for k, v in state_dict.items()
+        }
+
     def process_state_for_network(self, state: Any) -> Any:
         if isinstance(state, dict):
             state_dict = {}
@@ -120,79 +135,24 @@ class Agent:
                 'actor_loss': 0.0,
                 'critic_loss': 0.0,
                 'alpha_loss': 0.0,
-                'entropy': 0.0
+                'entropy': 0.0,
+                'alpha': self.alpha.item()
             }
         
-        # Sample batch
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
+        batched_states = self._batch_dict_to_tensor(states)
+        batched_next_states = self._batch_dict_to_tensor(next_states)
+
+        batched_actions = torch.as_tensor(np.vstack(actions), dtype=torch.float, device=self.device)
+        batched_rewards = torch.as_tensor(np.vstack(rewards), dtype=torch.float, device=self.device)
+        batched_dones = torch.as_tensor(np.vstack(dones), dtype=torch.float, device=self.device)
         
-        # batched_states = {
-        #     'market_data': torch.cat([torch.tensor(state['market_data'], dtype=torch.float) if isinstance(state['market_data'], np.ndarray) else state['market_data'] for state in states], dim=0).to(self.device),
-        #     'portfolio_state': torch.cat([torch.tensor(state['portfolio_state'], dtype=torch.float) if isinstance(state['portfolio_state'], np.ndarray) else state['portfolio_state'] for state in states], dim=0).to(self.device)
-        # }
-        
-        # batched_next_states = {
-        #     'market_data': torch.cat([torch.tensor(state['market_data'], dtype=torch.float) if isinstance(state['market_data'], np.ndarray) else state['market_data'] for state in next_states], dim=0).to(self.device),
-        #     'portfolio_state': torch.cat([torch.tensor(state['portfolio_state'], dtype=torch.float) if isinstance(state['portfolio_state'], np.ndarray) else state['portfolio_state'] for state in next_states], dim=0).to(self.device)
-        # }
-        
-        batched_states = {
-            'market_data': torch.stack(
-                [
-                    torch.tensor(state['market_data'], dtype=torch.float)
-                    if isinstance(state['market_data'], np.ndarray)
-                    else state['market_data']
-                    for state in states
-                ],
-                dim=0,
-            ).to(self.device),
-            'portfolio_state': torch.stack(
-                [
-                    torch.tensor(state['portfolio_state'], dtype=torch.float)
-                    if isinstance(state['portfolio_state'], np.ndarray)
-                    else state['portfolio_state']
-                    for state in states
-                ],
-                dim=0,
-            ).to(self.device),
-        }
-        
-        batched_next_states = {
-            'market_data': torch.stack(
-                [
-                    torch.tensor(state['market_data'], dtype=torch.float)
-                    if isinstance(state['market_data'], np.ndarray)
-                    else state['market_data']
-                    for state in next_states
-                ],
-                dim=0,
-            ).to(self.device),
-            'portfolio_state': torch.stack(
-                [
-                    torch.tensor(state['portfolio_state'], dtype=torch.float)
-                    if isinstance(state['portfolio_state'], np.ndarray)
-                    else state['portfolio_state']
-                    for state in next_states
-                ],
-                dim=0,
-            ).to(self.device),
-        }
-        
-        # batched_actions = torch.tensor(np.vstack(actions), device=self.device)
-        # batched_rewards = torch.tensor(np.vstack(rewards), device=self.device)
-        # batched_dones = torch.tensor(np.vstack(dones), device=self.device)
-        batched_actions = torch.tensor(np.vstack(actions), dtype=torch.float, device=self.device)
-        batched_rewards = torch.tensor(np.vstack(rewards), dtype=torch.float, device=self.device)
-        batched_dones = torch.tensor(np.vstack(dones), dtype=torch.float, device=self.device)
-        
-        # Sample next action
-        next_actions, next_log_probs, _ = self.actor.sample(batched_next_states)
-        
-        # Calculate target q value
-        next_q1_target, next_q2_target = self.critic_target(batched_next_states, next_actions)
-        next_q_target = torch.min(next_q1_target, next_q2_target)
-        next_q_target = next_q_target - self.alpha * next_log_probs
-        expected_q = batched_rewards + (1.0 - batched_dones) * self.gamma * next_q_target
+        with torch.no_grad():
+            next_actions, next_log_probs, _ = self.actor.sample(batched_next_states)
+            next_q1_target, next_q2_target = self.critic_target(batched_next_states, next_actions)
+            next_q_target = torch.min(next_q1_target, next_q2_target)
+            next_q_target = next_q_target - self.alpha * next_log_probs
+            expected_q = batched_rewards + (1.0 - batched_dones) * self.gamma * next_q_target
         
         # Update critic
         current_q1, current_q2 = self.critic(batched_states, batched_actions)
@@ -342,31 +302,43 @@ class Agent:
         return model_dirs[0]
    
 def main():
-    action_dim = 1
-    batch_size = 4
-    window_size = 30
-    feature_dim = 5
+    import math
+    
+    from src.config.config import DATA_DIR
+    
+    ticker = 'TSLA'
+    data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
+    data, _, _ = load_stock_data(data_dir)
+    
+    env = Environment(data=data, logger=Logger())
+    action_dim = env.action_space.shape[0]
+    batch_size = BATCH_SIZE
+    window_size = env.window_size
+    feature_dim = env.feature_dim
+    portfolio_dim = env.observation_space['portfolio_state'].shape[0]
     
     agent = Agent(
         action_dim=action_dim,
         input_shape=(window_size, feature_dim),
+        portfolio_state_len=portfolio_dim,
         logger=Logger()
     )
     
     for _ in range(batch_size * 2):
         state = {
-            'market_data': torch.tensor(np.random.randn(window_size, feature_dim), dtype=torch.float, device=agent.device),
-            'portfolio_state': torch.tensor(np.random.randn(2), dtype=torch.float, device=agent.device)
+            'market_data': np.random.randn(window_size, feature_dim),
+            'portfolio_state': np.random.randn(2)
         }
         action = np.random.randn(action_dim)
         reward = np.random.randn(1)
         next_state = {
-            'market_data': torch.tensor(np.random.randn(window_size, feature_dim), dtype=torch.float, device=agent.device),
-            'portfolio_state': torch.tensor(np.random.randn(2), dtype=torch.float, device=agent.device)
+            'market_data': np.random.randn(window_size, feature_dim),
+            'portfolio_state': np.random.randn(2)
         }
         done = np.random.randint(0, 2, (1,))
         
-        agent.replay_buffer.push(state, torch.tensor(action, dtype=torch.float, device=agent.device), reward, next_state, done)
+        # agent.replay_buffer.push(state, torch.tensor(action, dtype=torch.float, device=agent.device), reward, next_state, done)
+        agent.replay_buffer.push(state, action, reward, next_state, done)
     
     for _ in range(5):
         stats = agent.update_parameters()

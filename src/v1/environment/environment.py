@@ -158,7 +158,7 @@ class Environment:
         
         # Calculate portfolio state
         portfolio_value = self._get_portfolio_value()
-        portfolio_state = np.array([
+        portfolio_state = np.array([ #TODO update self.observation_space shape each time a new portfolio state is added
             self.balance / portfolio_value,  # cash ratio
             (self.shares_held * self._get_current_price()) / portfolio_value  # stock ratio
         ], dtype=np.float32)
@@ -278,8 +278,7 @@ class Environment:
         
         portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
         transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
-        position_penalty = 0.0001 * abs(self.shares_traded)
-        reward = portfolio_return - transaction_penalty # - position_penalty
+        reward = portfolio_return - transaction_penalty
         
         return reward
     
