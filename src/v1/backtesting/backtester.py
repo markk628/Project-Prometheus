@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from typing import Any, Dict, Optional
 
-from src.config.config import DATA_DIR, MODELS_DIR, INITIAL_BALANCE, TRANSACTION_FEE_PERCENT, WINDOW_SIZE
+from src.config.config import DATA_DIR, MODELS_DIR, INITIAL_BALANCE, SEC_FEE, SEC_FEE_PRINCIPAL, TAF_FEE, TAF_FEE_CAP, CAT_FEE, SPREAD, SLIPPAGE, WINDOW_SIZE
 from src.v1.environment.environment import Environment
 from src.v1.model.agent import Agent
 from src.utils.logger import Logger
@@ -17,20 +17,31 @@ class Backtester:
         window_size: int=WINDOW_SIZE,
         logger: Optional[Logger]=None,
         initial_balance: float=INITIAL_BALANCE,
-        transaction_fee_percent: float=TRANSACTION_FEE_PERCENT,
+        sec_fee: float=SEC_FEE,
+        sec_fee_principal: float=SEC_FEE_PRINCIPAL,
+        taf_fee: float=TAF_FEE,
+        taf_fee_cap: float=TAF_FEE_CAP,
+        cat_fee: float=CAT_FEE,
+        spread: float=SPREAD,
+        slippage: float=SLIPPAGE,
     ):
         self.agent = agent
         self.test_data = test_data
         self.window_size = window_size
         self.logger = logger
         self.initial_balance = initial_balance
-        self.transaction_fee_percent = transaction_fee_percent
+        self.sec_fee = sec_fee
+        self.sec_fee_principal = sec_fee_principal
+        self.taf_fee = taf_fee
+        self.taf_fee_cap = taf_fee_cap
+        self.cat_fee = cat_fee
+        self.spread = spread
+        self.slippage = slippage
         
         self.env = Environment(
             data=self.test_data,
             window_size=self.window_size,
             initial_balance=self.initial_balance,
-            transaction_fee_percent=self.transaction_fee_percent,
             logger=self.logger
         )
         
@@ -147,20 +158,21 @@ def main():
     
     action_dim = 1
     env = Environment(data=test_data)
-    model_path = f"{MODELS_DIR}/final_sac_model_20260214_144009"
+    action_dim = env.action_space.shape[0]
+    portfolio_dim = env.observation_space['portfolio_state'].shape[0]
     agent = Agent(
         action_dim=action_dim,
         input_shape=(env.window_size, env.feature_dim),
+        portfolio_state_len=portfolio_dim,
         logger=logger
     )
+    model_path = f"{MODELS_DIR}/final_sac_model_20260219_223246"
     agent.load_model(model_path)
     
     backtester = Backtester(
         agent=agent,
         test_data=test_data,
-        logger=logger,
-        initial_balance=INITIAL_BALANCE,
-        transaction_fee_percent=TRANSACTION_FEE_PERCENT
+        logger=logger
     )
     
     backtester.run_backtest()

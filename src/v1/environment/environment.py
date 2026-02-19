@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
+from collections import deque
 from gymnasium import spaces
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config.config import WINDOW_SIZE, INITIAL_BALANCE, MAX_TRADING_UNITS, TRANSACTION_FEE_PERCENT
+from src.config.config import WINDOW_SIZE, INITIAL_BALANCE, MAX_TRADING_UNITS, SEC_FEE, SEC_FEE_PRINCIPAL, TAF_FEE, TAF_FEE_CAP, CAT_FEE, SPREAD, SLIPPAGE
 from src.utils.logger import Logger
 from src.utils.utils import load_stock_data
 
@@ -14,7 +15,13 @@ class Environment:
         window_size: int=WINDOW_SIZE,
         initial_balance: float=INITIAL_BALANCE,
         max_trading_units: int=MAX_TRADING_UNITS,
-        transaction_fee_percent: float=TRANSACTION_FEE_PERCENT,
+        sec_fee: float=SEC_FEE,
+        sec_fee_principal: float=SEC_FEE_PRINCIPAL,
+        taf_fee: float=TAF_FEE,
+        taf_fee_cap: float=TAF_FEE_CAP,
+        cat_fee: float=CAT_FEE,
+        spread: float=SPREAD,
+        slippage: float=SLIPPAGE,
         logger: Optional[Logger]=None
     ):
         self.data = data.drop(['timestamp', 'close'], axis=1).to_numpy(dtype=np.float32)
@@ -35,7 +42,13 @@ class Environment:
         )
         '''
         self.max_trading_units = max_trading_units
-        self.transaction_fee_percent = transaction_fee_percent
+        self.sec_fee = sec_fee
+        self.sec_fee_principal = sec_fee_principal
+        self.taf_fee = taf_fee
+        self.taf_fee_cap = taf_fee_cap
+        self.cat_fee = cat_fee
+        self.spread = spread
+        self.slippage = slippage
         self.logger = logger
         
         # Data
@@ -47,7 +60,6 @@ class Environment:
         self.current_step_in_episode = 0
         self.balance = initial_balance
         self.shares_held = 0
-        self.cost_basis = 0
         self.total_shares_purchased = 0
         self.total_shares_sold = 0
         self.total_sales_value = 0
@@ -58,6 +70,9 @@ class Environment:
         self.total_dollar_traded = 0
         self.hold_time = 0
         self.hold_times = []
+        
+        # self.recent_returns = deque(maxlen=self.window_size)
+        # self.return_volatility = 1e-9
         
         # Episode history
         self.states_history = []
@@ -89,7 +104,6 @@ class Environment:
         self.current_step_in_episode = 0
         self.balance = self.initial_balance # TODO eventually we want the previous episode's balance to carry over so remove this when model is consistently winning
         self.shares_held = 0
-        self.cost_basis = 0
         self.total_shares_purchased = 0
         self.total_shares_sold = 0
         self.total_sales_value = 0
@@ -100,6 +114,9 @@ class Environment:
         self.total_dollar_traded = 0
         self.hold_time = 0
         self.hold_times = []
+        
+        # self.recent_returns = deque(maxlen=self.window_size)
+        # self.return_volatility = 1e-9
         
         # History
         self.states_history = []
@@ -128,6 +145,9 @@ class Environment:
         
         # Record portfolio value
         self.portfolio_values_history.append(current_portfolio_value)
+        # self.recent_returns.append(current_portfolio_value)
+        # if len(self.recent_returns) > 1:
+        #     self.return_volatility = max(np.std(self.recent_returns) + 1e-9, 1e-4)
         
         # Calculate reward
         reward = self._calculate_reward(prev_portfolio_value, current_portfolio_value)
@@ -173,6 +193,60 @@ class Environment:
         
         return observation
     
+    def _calculate_execution_price(self, side: str, market_price: float) -> float:
+        """
+        side: 'buy' or 'sell'
+        market_price: midpoint or candle close price
+        
+        Minute-data assumption:
+        - Spread is symmetric
+        - Slippage proportional to price
+        """
+        
+        half_spread = self.spread / 2
+        slippage = market_price * self.slippage
+        
+        if side == "buy":
+            return market_price + half_spread + slippage
+        
+        elif side == "sell":
+            return market_price - half_spread - slippage
+        
+        else:
+            raise ValueError("side must be 'buy' or 'sell'")
+        
+    def _calculate_regulatory_fees(self, side: str, shares: int, notional: float) -> float:
+        """
+        Calculates SEC, TAF, CAT fees.
+        """
+        
+        sec_fee = 0.0
+        taf_fee = 0.0
+        cat_fee = shares * self.cat_fee
+        
+        # SEC fee (currently zero, but structure left in place)
+        if side == "sell":
+            sec_fee = notional * self.sec_fee
+            
+            # FINRA TAF (sell only)
+            taf_fee = min(shares * self.taf_fee, self.taf_fee_cap)
+        
+        return sec_fee + taf_fee + cat_fee
+
+    def _calculate_transaction_cost(self, side: str, shares: int, market_price: float):
+        """
+        Returns:
+            execution_price
+            total_fees
+            total_notional
+        """
+        
+        execution_price = self._calculate_execution_price(side, market_price)
+        notional = shares * execution_price
+        fees = self._calculate_regulatory_fees(side, shares, notional)
+        
+        return execution_price, fees, notional
+    
     def _execute_trade_action(self, action: float) -> None:
         current_price = self._get_current_price()
         
@@ -185,77 +259,76 @@ class Environment:
         previous_shares = self.shares_held
         
         if not '20:59:00' in self.timestamps[self.current_step]:
-            if action_value > 0:  # Buy
-                max_affordable = self.balance / (current_price * (1 + self.transaction_fee_percent))
-                shares_to_buy = min(
-                    max_affordable,
-                    self.max_trading_units * action_value
-                )
-                
-                shares_to_buy = int(shares_to_buy)
+            if action_value > 0:
+                market_price = self._get_current_price()
+                max_shares = int(self.balance / market_price)
+                shares_to_buy = min(max_shares, int(self.max_trading_units * action_value))
                 
                 if shares_to_buy > 0:
-                    buy_cost = shares_to_buy * current_price
-                    transaction_fee = buy_cost * self.transaction_fee_percent
-                    total_cost = buy_cost + transaction_fee
+                    exec_price, fees, notional = self._calculate_transaction_cost(
+                        side="buy",
+                        shares=shares_to_buy,
+                        market_price=market_price
+                    )
+                    total_cost = notional + fees
                     
                     if self.balance >= total_cost:
                         self.balance -= total_cost
                         self.shares_held += shares_to_buy
                         self.total_shares_purchased += shares_to_buy
-                        self.total_transaction_fee += transaction_fee
-                        self.current_transaction_fee = transaction_fee
+                        self.total_transaction_fee += fees
+                        self.current_transaction_fee = fees
                         self.shares_traded = shares_to_buy
+                        self.total_dollar_traded += notional
                         self.trade_execution_count += 1
-                        self.total_dollar_traded += buy_cost
-                        
-                        if self.shares_held > 0:
-                            self.cost_basis = ((self.cost_basis * (self.shares_held - shares_to_buy)) + buy_cost) / self.shares_held
-                        
-                        if self.logger:
-                            self.logger.debug(f"Buy: {shares_to_buy} shares @ {current_price:.2f}, Cost: {total_cost:.2f}, Fee: {transaction_fee:.2f}")    
-            elif action_value < 0:  # Sell
+
+            elif action_value < 0:
                 shares_to_sell = min(
                     self.shares_held,
-                    self.max_trading_units * abs(action_value)
+                    int(self.max_trading_units * abs(action_value))
                 )
                 
-                shares_to_sell = int(shares_to_sell)
-                
                 if shares_to_sell > 0:
-                    sell_value = shares_to_sell * current_price
-                    transaction_fee = sell_value * self.transaction_fee_percent
-                    net_value = sell_value - transaction_fee
+                    exec_price, fees, notional = self._calculate_transaction_cost(
+                        side="sell",
+                        shares=shares_to_sell,
+                        market_price=self._get_current_price()
+                    )
                     
-                    self.balance += net_value
+                    net_proceeds = notional - fees
+                    
+                    self.balance += net_proceeds
                     self.shares_held -= shares_to_sell
                     self.total_shares_sold += shares_to_sell
-                    self.total_sales_value += sell_value
-                    self.total_transaction_fee += transaction_fee
-                    self.current_transaction_fee = transaction_fee
+                    self.total_sales_value = notional
+                    self.total_transaction_fee += fees
+                    self.current_transaction_fee = fees
                     self.shares_traded = shares_to_sell
+                    self.total_dollar_traded += notional
                     self.trade_execution_count += 1
-                    self.total_dollar_traded += sell_value
-                    
-                    if self.logger:
-                        self.logger.debug(f"Sell: {shares_to_sell} shares @ {current_price:.2f}, Profit: {net_value:.2f}, Fee: {transaction_fee:.2f}")
+
             else: # hold
                 self.shares_traded = 0
         else:
             if self.shares_held > 0:
-                sell_value = self.shares_held * current_price
-                transaction_fee = sell_value * self.transaction_fee_percent
-                net_value = sell_value - transaction_fee
+                market_price = self._get_current_price()
+                shares_to_sell = self.shares_held
+                exec_price, fees, notional = self._calculate_transaction_cost(
+                    side="sell",
+                    shares=shares_to_sell,
+                    market_price=market_price
+                )
+                net_proceeds = notional - fees
                 
-                self.balance += net_value
-                self.total_shares_sold += self.shares_held
+                self.balance += net_proceeds
+                self.total_shares_sold += shares_to_sell
                 self.shares_held = 0
-                self.total_sales_value += sell_value
-                self.total_transaction_fee += transaction_fee
-                self.current_transaction_fee = transaction_fee
-                self.shares_traded = 0
+                self.total_sales_value += notional
+                self.total_transaction_fee += fees
+                self.current_transaction_fee = fees
+                self.shares_traded = shares_to_sell
                 self.trade_execution_count += 1
-                self.total_dollar_traded += sell_value
+                self.total_dollar_traded += notional
                 
         if self.shares_held > 0:
             self.hold_time += 1
@@ -276,10 +349,30 @@ class Environment:
         # else:
         #     reward = 0
         
-        portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
-        transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
-        reward = portfolio_return - transaction_penalty
         
+        # portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
+        # transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
+        # reward = portfolio_return - transaction_penalty
+        
+        
+        # # 1. Use Log Returns (more stable for compounding)
+        # portfolio_return = np.log(current_portfolio_value / prev_portfolio_value)
+        
+        # # 2. Penalty as a ratio of the value
+        # # Ensure shares_traded is relative (e.g., 0.1 means 10% of portfolio moved)
+        # transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
+        
+        # # 3. Scale the whole signal
+        # # A multiplier of 100 transforms 0.01 (1%) into 1.0
+        # reward = (portfolio_return - transaction_penalty) * 100 
+        
+        
+        # portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
+        # transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
+        # reward = np.clip((portfolio_return - transaction_penalty) / self.return_volatility, -10, 10)
+        
+        
+        reward = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
         return reward
     
     def _get_info(self) -> Dict[str, Any]:
@@ -308,7 +401,6 @@ class Environment:
             'gross_return_pct': gross_return_pct,
             'net_return': net_return,
             'net_return_pct': net_return_pct,
-            'cost_basis': self.cost_basis,
             'total_shares_purchased': self.total_shares_purchased,
             'total_shares_sold': self.total_shares_sold,
             'total_sales_value': self.total_sales_value,

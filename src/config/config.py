@@ -42,7 +42,14 @@ CUTOFF_TIMESTAMP = '2021-05-06 08:00:00'
 WINDOW_SIZE = 20
 INITIAL_BALANCE = 10000.0       # Initial trading balance
 MAX_TRADING_UNITS = 10          
-TRANSACTION_FEE_PERCENT = 0.001 # Trade transcation fee percentage
+# Regularly check https://alpaca.markets/support/regulatory-fees for updated fees
+SEC_FEE = 0                 # per SEC_FEE_PRINCIPAL of principal (sells only) - this fee is rounded up to the nearest penny
+SEC_FEE_PRINCIPAL = 1000000
+TAF_FEE = 0.000166          # per share (sells only) — this fee is applied on a per-trade basis, rounded up to the nearest penny, 
+TAF_FEE_CAP = 8.30          # and capped at $8.30
+CAT_FEE = 0.0000265         # charged per trade
+SPREAD = 0.02               # currently for minute data 0.05 or 0.10 for daily data
+SLIPPAGE = 0.0005           # currently for minute data 0.001 for daily data
 
 # Model hyperparameters config
 HIDDEN_DIM = 256            # Hidden dim size

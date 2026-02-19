@@ -78,6 +78,7 @@ class Trainer:
                 self.train_env.current_step = train_randomized_start_idx_list.pop()
                 
             state = self.train_env.reset()
+            episode_train_rewards = []
             train_reward = 0
             train_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, 'alpha': 0}
             done = False
@@ -96,6 +97,7 @@ class Trainer:
                 
                 state = next_state
                 train_reward += reward
+                episode_train_rewards.append(reward)
             
             net_return_pct = info['net_return_pct']
             self.train_returns.append(net_return_pct * 100)
@@ -123,10 +125,17 @@ class Trainer:
             episode_end_date = self.train_env.timestamps[self.train_env.current_step]
             
             if self.logger:
+                episode_train_rewards = np.array(episode_train_rewards)
                 self.logger.info(f"\nEP: {episode}/{self.num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
-                                   \nReward: {train_reward:.2f}\
+                                   \nReward Total: {train_reward:.2f}\
+                                   \nReward Mean: {episode_train_rewards.mean()}\
+                                   \nReward STD: {episode_train_rewards.std()}\
+                                   \nReward Min: {episode_train_rewards.min()}\
+                                   \nReward Max: {episode_train_rewards.max()}\
+                                   \nPositive Reward PCT: {np.mean(episode_train_rewards > 0):.2%}\
+                                   \nZero-ish Reward PCT: {np.mean(np.abs(episode_train_rewards) < 1e-6):.2%}\
                                    \nBalance: ${info['balance']:.2f}\
                                    \nGross Return (Pre-Fee): {gross_return_pct:.2%}\
                                    \nNet Return (Post-Fee): {net_return_pct:.2%} {'POSITIVE' if net_return_pct > 0 else ''}\
@@ -166,7 +175,7 @@ class Trainer:
                     
             self.logger.info(f"Training complete: {format_duration(total_time)})\
                               \nPositive Return Training: {positive_return_train}/{self.num_episodes}\
-                              \nPositive Returns Validation: {positive_return_valid}/{self.num_episodes}")
+                              \nPositive Returns Validation: {positive_return_valid}/{int(self.num_episodes / self.valid_interval)}")
         
         return {
             "train_rewards": self.train_rewards,
@@ -181,6 +190,7 @@ class Trainer:
     def validate(self, num_episodes: int=1):
         for episode in range(1, num_episodes + 1):
             state = self.valid_env.reset()
+            episode_valid_rewards = []
             valid_reward = 0
             done = False
             
@@ -189,6 +199,7 @@ class Trainer:
                 next_state, reward, done, info = self.valid_env.step(action)
                 state = next_state
                 valid_reward += reward
+                episode_valid_rewards.append(reward)
                 self.valid_actions.append(action)
             
             net_return_pct = info['net_return_pct']
@@ -212,10 +223,17 @@ class Trainer:
             episode_end_date = self.valid_env.timestamps[self.valid_env.current_step]
         
             if self.logger:
+                episode_valid_rewards = np.array(episode_valid_rewards)
                 self.logger.info(f"\nValid EP: {episode}/{num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
-                                   \nReward: {valid_reward:.2f}\
+                                   \nReward Total: {valid_reward:.2f}\
+                                   \nReward Mean: {episode_valid_rewards.mean()}\
+                                   \nReward STD: {episode_valid_rewards.std()}\
+                                   \nReward Min: {episode_valid_rewards.min()}\
+                                   \nReward Max: {episode_valid_rewards.max()}\
+                                   \nPositive Reward PCT: {np.mean(episode_valid_rewards > 0):.2%}\
+                                   \nZero-ish Reward PCT: {np.mean(np.abs(episode_valid_rewards) < 1e-6):.2%}\
                                    \nBalance: ${info['balance']:.2f}\
                                    \nGross Return (Pre-Fee): {gross_return_pct:.2%}\
                                    \nNet Return (Post-Fee): {net_return_pct:.2%} {'POSITIVE' if net_return_pct > 0 else ''}\
