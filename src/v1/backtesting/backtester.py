@@ -55,8 +55,8 @@ class Backtester:
                 state = next_state
                 
             self.results["balances"].append(info["balance"])
-            self.results["returns"].append(info["total_return"])
-            self.results["return_pcts"].append(info["total_return_pct"])
+            self.results["returns"].append(info["net_return"])
+            self.results["return_pcts"].append(info["net_return_pct"])
             self.results["rewards"].append(reward)
                 
             
@@ -142,13 +142,12 @@ def main():
     logger = Logger()
     
     ticker = 'TSLA'
-    test_data_dir = f'{DATA_DIR}/preprocessed/{ticker}/{ticker}_test.csv'
+    test_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_test.csv'
     test_data, _, _ = load_stock_data(test_data_dir)
     
     action_dim = 1
     env = Environment(data=test_data)
-    
-    model_path = f"{MODELS_DIR}/final_sac_model_20260212_185446"
+    model_path = f"{MODELS_DIR}/final_sac_model_20260214_144009"
     agent = Agent(
         action_dim=action_dim,
         input_shape=(env.window_size, env.feature_dim),

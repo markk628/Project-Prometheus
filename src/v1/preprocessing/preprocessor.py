@@ -421,7 +421,7 @@ class DataPreprocessor:
         df = self._drop_rows_before_timestamp(df, timestamp)
         df_train, df_valid, df_test = self._split_data(df)
         # df_train, df_valid, df_test = self._normalize_data(df_train, df_valid, df_test)
-        base_dir = self.data_dir / 'preprocessed' / ticker
+        base_dir = self.data_dir / 'preprocessed' / 'v1' / ticker
         create_directory(base_dir)
         save_to_csv(df_train, f'{base_dir}/{ticker}_train.csv', index=False)
         save_to_csv(df_valid, f'{base_dir}/{ticker}_valid.csv', index=False)

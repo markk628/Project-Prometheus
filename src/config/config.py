@@ -54,11 +54,12 @@ GAMMA = 0.99                # Discount factor (higher = cares more about long te
 TAU = 0.005                 # Controls how soft the target network is updated
 REPLAY_BUFFER_SIZE = 300000 # Replay buffer's max size (increase/decrease based on ram size)
 TARGET_UPDATE_INTERVAL = 1
+SEED = 42
 
 # Training config
 BATCH_SIZE = 256
 NUM_EPISODES = 1000
-VALIDATION_INTERVAL = 10
+VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
 
 MINUTES_PER_TRADING_DAY = 390   # 9:30 AM to 3:59 PM EST (regular market)

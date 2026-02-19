@@ -54,10 +54,10 @@ class Environment:
         self.total_transaction_fee = 0
         self.current_transaction_fee = 0
         self.shares_traded = 0
-        
-        # Debugging use
-        self.total_transaction_fee_penalty = 0
-        self.total_shares_held_penalty = 0
+        self.trade_execution_count = 0
+        self.total_dollar_traded = 0
+        self.hold_time = 0
+        self.hold_times = []
         
         # Episode history
         self.states_history = []
@@ -96,9 +96,10 @@ class Environment:
         self.total_transaction_fee = 0
         self.current_transaction_fee = 0
         self.shares_traded = 0
-        
-        self.total_transaction_fee_penalty = 0
-        self.total_shares_held_penalty = 0
+        self.trade_execution_count = 0
+        self.total_dollar_traded = 0
+        self.hold_time = 0
+        self.hold_times = []
         
         # History
         self.states_history = []
@@ -181,6 +182,7 @@ class Environment:
             return
         
         action_value = action[0] if isinstance(action, np.ndarray) else action
+        previous_shares = self.shares_held
         
         if not '20:59:00' in self.timestamps[self.current_step]:
             if action_value > 0:  # Buy
@@ -204,6 +206,8 @@ class Environment:
                         self.total_transaction_fee += transaction_fee
                         self.current_transaction_fee = transaction_fee
                         self.shares_traded = shares_to_buy
+                        self.trade_execution_count += 1
+                        self.total_dollar_traded += buy_cost
                         
                         if self.shares_held > 0:
                             self.cost_basis = ((self.cost_basis * (self.shares_held - shares_to_buy)) + buy_cost) / self.shares_held
@@ -230,6 +234,8 @@ class Environment:
                     self.total_transaction_fee += transaction_fee
                     self.current_transaction_fee = transaction_fee
                     self.shares_traded = shares_to_sell
+                    self.trade_execution_count += 1
+                    self.total_dollar_traded += sell_value
                     
                     if self.logger:
                         self.logger.debug(f"Sell: {shares_to_sell} shares @ {current_price:.2f}, Profit: {net_value:.2f}, Fee: {transaction_fee:.2f}")
@@ -248,6 +254,14 @@ class Environment:
                 self.total_transaction_fee += transaction_fee
                 self.current_transaction_fee = transaction_fee
                 self.shares_traded = 0
+                self.trade_execution_count += 1
+                self.total_dollar_traded += sell_value
+                
+        if self.shares_held > 0:
+            self.hold_time += 1
+        elif previous_shares > 0 and self.shares_held == 0:
+            self.hold_times.append(self.hold_time)
+            self.hold_time = 0
                 
     def _get_current_price(self) -> float:
         return self.prices[self.current_step]
@@ -265,16 +279,7 @@ class Environment:
         portfolio_return = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
         transaction_penalty = (self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value
         position_penalty = 0.0001 * abs(self.shares_traded)
-        
-        # transaction_penalty = ((self.current_transaction_fee * abs(self.shares_traded)) / current_portfolio_value) * 0.1
-        # position_fraction = (self.shares_traded * self._get_current_price()) / current_portfolio_value
-        # position_penalty = 0.001 * abs(position_fraction)
-
-        
-        reward = portfolio_return - transaction_penalty - position_penalty
-        
-        self.total_transaction_fee_penalty += transaction_penalty
-        self.total_shares_held_penalty += position_penalty
+        reward = portfolio_return - transaction_penalty # - position_penalty
         
         return reward
     
@@ -283,11 +288,15 @@ class Environment:
         portfolio_value = self._get_portfolio_value()
         
         if self.initial_balance > 0:
-            total_return = portfolio_value - self.initial_balance
-            total_return_pct = (portfolio_value - self.initial_balance) / self.initial_balance
+            gross_return = portfolio_value + self.total_transaction_fee - self.initial_balance
+            gross_return_pct = gross_return / self.initial_balance
+            net_return = portfolio_value - self.initial_balance
+            net_return_pct = net_return / self.initial_balance
         else:
-            total_return = 0
-            total_return_pct = 0
+            gross_return = 0
+            gross_return_pct = 0
+            net_return = 0
+            net_return_pct = 0
         
         return {
             'step': self.current_step,
@@ -296,15 +305,18 @@ class Environment:
             'shares_held': self.shares_held,
             'current_price': current_price,
             'portfolio_value': portfolio_value,
-            'total_return': total_return,
-            'total_return_pct': total_return_pct,
+            'gross_return': gross_return,
+            'gross_return_pct': gross_return_pct,
+            'net_return': net_return,
+            'net_return_pct': net_return_pct,
             'cost_basis': self.cost_basis,
             'total_shares_purchased': self.total_shares_purchased,
             'total_shares_sold': self.total_shares_sold,
             'total_sales_value': self.total_sales_value,
             'total_transaction_fee': self.total_transaction_fee,
-            'total_transaction_fee_penalty': self.total_transaction_fee_penalty,
-            'total_shares_held_penalty': self.total_shares_held_penalty
+            'trade_execution_count': self.trade_execution_count,
+            'turnover_ratio': self.total_dollar_traded / self.initial_balance,
+            'avg_hold_time': np.array(self.hold_times).mean() if self.hold_times else 0
         }
         
     def render(self) -> None:
@@ -316,10 +328,9 @@ class Environment:
         print(f"Shares held: {info['shares_held']}")
         print(f"Current price: ${info['current_price']:.2f}")
         print(f"Portfolio value: ${info['portfolio_value']:.2f}")
-        print(f"Total return: {info['total_return']}%")
-        print(f"Total return pct: {info['total_return_pct']:.2%}")
+        print(f"Net return pct: {info['net_return_pct']:.2%}")
         print(f"Total Fee paid: ${info['total_transaction_fee']:.2f}")
-        print("-" * 50)
+        print("=" * 50)
         
     def get_episode_data(self) -> Dict[str, List]:
         return {
@@ -340,7 +351,7 @@ def main():
     from src.config.config import DATA_DIR
     
     ticker = 'TSLA'
-    data_dir = f'{DATA_DIR}/preprocessed/{ticker}/{ticker}_train.csv'
+    data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
     data, _, _ = load_stock_data(data_dir)
     
     env = Environment(data=data, logger=Logger())

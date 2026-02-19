@@ -8,7 +8,7 @@ from pathlib import Path
 from time import time
 from typing import Dict, List, Optional, Union
 
-from src.config.config import DATA_DIR, BATCH_SIZE, NUM_EPISODES, VALIDATION_INTERVAL, SAVE_MODEL_INTERVAL, MODELS_DIR, RESULTS_DIR
+from src.config.config import DATA_DIR, BATCH_SIZE, NUM_EPISODES, VALID_INTERVAL, SAVE_MODEL_INTERVAL, MODELS_DIR, RESULTS_DIR, SEED
 from src.v1.environment.environment import Environment
 from src.utils.logger import Logger
 from src.v1.model.agent import Agent
@@ -22,11 +22,11 @@ class Trainer:
         valid_env: Environment,
         randomize_trading_days: bool=False,
         batch_size: int=BATCH_SIZE,
-        num_episodes: int = NUM_EPISODES,
-        validation_interval: int = VALIDATION_INTERVAL,
-        save_interval: int = SAVE_MODEL_INTERVAL,
-        models_dir: Union[str, Path] = MODELS_DIR,
-        results_dir: Union[str, Path] = RESULTS_DIR,
+        num_episodes: int=NUM_EPISODES,
+        valid_interval: int=VALID_INTERVAL,
+        save_interval: int=SAVE_MODEL_INTERVAL,
+        models_dir: Union[str, Path]=MODELS_DIR,
+        results_dir: Union[str, Path]=RESULTS_DIR,
         logger: Optional[Logger]=None
     ):
         self.agent = agent
@@ -35,7 +35,7 @@ class Trainer:
         self.randomize_trading_days = randomize_trading_days
         self.batch_size = batch_size
         self.num_episodes = num_episodes
-        self.validation_interval = validation_interval
+        self.valid_interval = valid_interval
         self.save_interval = save_interval
         self.models_dir = Path(models_dir)
         self.results_dir = Path(results_dir)
@@ -44,9 +44,19 @@ class Trainer:
         create_directory(self.models_dir)
         create_directory(self.results_dir)
         
-        self.episode_returns = []
-        self.episode_rewards = []
+        self.train_returns = []
+        self.valid_returns = []
+        self.train_rewards = []
         self.valid_rewards = []
+        self.train_fee_impacts = []
+        self.valid_fee_impacts = []
+        self.train_total_trade_counts = []
+        self.valid_total_trade_counts = []
+        self.train_turnover_ratios = []
+        self.valid_turnover_ratios = []
+        self.train_avg_hold_times = []
+        self.valid_avg_hold_times = []
+        
         self.train_losses = []
         self.train_actions = []
         self.valid_actions = []
@@ -68,8 +78,8 @@ class Trainer:
                 self.train_env.current_step = train_randomized_start_idx_list.pop()
                 
             state = self.train_env.reset()
-            episode_reward = 0
-            episode_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, 'alpha': 0}
+            train_reward = 0
+            train_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, 'alpha': 0}
             done = False
             
             while not done:
@@ -82,56 +92,57 @@ class Trainer:
                     loss = self.agent.update_parameters(self.batch_size)
                     
                     for k, v in loss.items():
-                        episode_loss[k] += v
+                        train_loss[k] += v
                 
                 state = next_state
-                episode_reward += reward
+                train_reward += reward
             
-            self.episode_returns.append(info['total_return_pct'] * 100)
-            self.episode_rewards.append(episode_reward)
+            net_return_pct = info['net_return_pct']
+            self.train_returns.append(net_return_pct * 100)
+            self.train_rewards.append(train_reward)
+            
+            gross_return_pct = info['gross_return_pct']
+            fee_impact = (gross_return_pct - net_return_pct)
+            self.train_fee_impacts.append(fee_impact * 100)
+            
+            trade_execution_count = info['trade_execution_count']
+            self.train_total_trade_counts.append(trade_execution_count)
+            
+            turnover_ratio = info['turnover_ratio']
+            self.train_turnover_ratios.append(turnover_ratio * 100)
+            
+            avg_hold_time = info['avg_hold_time']
+            self.train_avg_hold_times.append(avg_hold_time)
             
             if self.train_env.current_step_in_episode > 0:
-                for k in episode_loss:
-                    episode_loss[k] /= self.train_env.current_step_in_episode
-            self.train_losses.append(episode_loss)
+                for k in train_loss:
+                    train_loss[k] /= self.train_env.current_step_in_episode
+            self.train_losses.append(train_loss)
             
             episode_start_date = self.train_env.timestamps[self.train_env.current_step - self.train_env.current_step_in_episode]
             episode_end_date = self.train_env.timestamps[self.train_env.current_step]
             
             if self.logger:
-                # self.logger.info(f"\nEP: {episode}/{self.num_episodes}\
-                #                    \nEpisode Start Date: {episode_start_date}\
-                #                    \nEpisode End Date: {episode_end_date}\
-                #                    \nReward: {episode_reward:.2f}\
-                #                    \nBalance: ${info['balance']:.2f}\
-                #                    \nTotal Return: ${info['total_return']:.2f}\
-                #                    \nTotal Return PCT: {info['total_return_pct']:.2%}\
-                #                    \nTotal Shares Purchased: {info['total_shares_purchased']}\
-                #                    \nTotal Shares Sold: {info['total_shares_sold']}\
-                #                    \nTotal Transaction Fee Penalty: {info['total_transaction_fee_penalty']}\
-                #                    \nTotal Shares Held Penalty: {info['total_shares_held_penalty']}\
-                #                    \nPenalty To Return PCT Ratio: {info['total_transaction_fee_penalty'] + info['total_shares_held_penalty']}/{abs(info['total_return_pct'])} = {(info['total_transaction_fee_penalty'] + info['total_shares_held_penalty'])/abs(info['total_return_pct'])}\
-                #                    \n{'='*50}")
-                
                 self.logger.info(f"\nEP: {episode}/{self.num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
-                                   \nReward: {episode_reward:.2f}\
+                                   \nReward: {train_reward:.2f}\
                                    \nBalance: ${info['balance']:.2f}\
-                                   \nTotal Return: {info['total_return_pct']:.2%}\
-                                   \nTotal Shares Traded: {info['total_shares_purchased']}\
-                                   \nTotal Transaction Fee Penalty: {info['total_transaction_fee_penalty']}\
-                                   \nTotal Shares Held Penalty: {info['total_shares_held_penalty']}\
-                                   \nPenalty To Return Ratio: {info['total_transaction_fee_penalty'] + info['total_shares_held_penalty']}/{abs(info['total_return_pct'])} = {(info['total_transaction_fee_penalty'] + info['total_shares_held_penalty'])/abs(info['total_return_pct'])}\
+                                   \nGross Return (Pre-Fee): {gross_return_pct:.2%}\
+                                   \nNet Return (Post-Fee): {net_return_pct:.2%} {'POSITIVE' if net_return_pct > 0 else ''}\
+                                   \nFee Impact: {fee_impact:.2%}\
+                                   \nTotal Trade Count: {trade_execution_count}\
+                                   \nTurnover Ratio: {turnover_ratio:.2%}\
+                                   \nAvg Hold Time: {avg_hold_time}\
+                                   \nTotal Shares Traded: {info['total_shares_sold']}\
                                    \n{'='*50}")
             
-            if episode % self.validation_interval == 0:
+            if episode % self.valid_interval == 0:
                 if self.randomize_trading_days:
                     self.valid_env.current_step = valid_randomized_start_idx_list.pop()
-                valid_reward = self.validate()
-                self.valid_rewards.append(valid_reward)
+                self.validate()
             
-            if episode % self.validation_interval == 0:
+            if episode % self.valid_interval == 0:
                 self._plot_training_curves(timestamp)
         
         final_model_path = self.agent.save_model(self.models_dir, "final_", timestamp)
@@ -142,10 +153,23 @@ class Trainer:
         
         if self.logger:
             total_time = time() - start_time
-            self.logger.info(f"Training complete: {format_duration(total_time)})")
+            positive_return_train = 0
+            positive_return_valid = 0
+            
+            for train_return in self.train_returns:
+                if train_return > 0:
+                    positive_return_train += 1
+            
+            for valid_return in self.valid_returns:
+                if valid_return > 0:
+                    positive_return_valid += 1
+                    
+            self.logger.info(f"Training complete: {format_duration(total_time)})\
+                              \nPositive Return Training: {positive_return_train}/{self.num_episodes}\
+                              \nPositive Returns Validation: {positive_return_valid}/{self.num_episodes}")
         
         return {
-            "episode_rewards": self.episode_rewards,
+            "train_rewards": self.train_rewards,
             "valid_rewards": self.valid_rewards,
             "actor_losses": [loss["actor_loss"] for loss in self.train_losses],
             "critic_losses": [loss["critic_loss"] for loss in self.train_losses],
@@ -154,249 +178,187 @@ class Trainer:
             "alphas": [loss["alpha"] for loss in self.train_losses]
         }
         
-    def validate(self, num_episodes: int=1) -> float:
-        total_reward = 0
-        
+    def validate(self, num_episodes: int=1):
         for episode in range(1, num_episodes + 1):
             state = self.valid_env.reset()
-            episode_reward = 0
+            valid_reward = 0
             done = False
             
             while not done:
                 action = self.agent.select_action(state, validate=True)
                 next_state, reward, done, info = self.valid_env.step(action)
                 state = next_state
-                episode_reward += reward
+                valid_reward += reward
                 self.valid_actions.append(action)
             
-            total_reward += episode_reward
+            net_return_pct = info['net_return_pct']
+            self.valid_returns.append(net_return_pct * 100)
+            self.valid_rewards.append(valid_reward)
+            
+            gross_return_pct = info['gross_return_pct']
+            fee_impact = (gross_return_pct - net_return_pct)
+            self.valid_fee_impacts.append(fee_impact * 100)
+            
+            trade_execution_count = info['trade_execution_count']
+            self.valid_total_trade_counts.append(trade_execution_count)
+            
+            turnover_ratio = info['turnover_ratio']
+            self.valid_turnover_ratios.append(turnover_ratio * 100)
+            
+            avg_hold_time = info['avg_hold_time']
+            self.valid_avg_hold_times.append(avg_hold_time)
             
             episode_start_date = self.valid_env.timestamps[self.valid_env.current_step - self.valid_env.current_step_in_episode]
             episode_end_date = self.valid_env.timestamps[self.valid_env.current_step]
         
             if self.logger:
-                # self.logger.info(f"\nValid EP: {episode}/{num_episodes}\
-                #                    \nEpisode Start Date: {episode_start_date}\
-                #                    \nEpisode End Date: {episode_end_date}\
-                #                    \nReward: {episode_reward:.2f}\
-                #                    \nBalance: ${info['balance']:.2f}\
-                #                    \nTotal Return: ${info['total_return']:.2f}\
-                #                    \nTotal Return PCT: {info['total_return_pct']:.2%}%\
-                #                    \nTotal Shares Purchased: {info['total_shares_purchased']}\
-                #                    \nTotal Shares Sold: {info['total_shares_sold']}\
-                #                    \n{'='*50}")
-                
                 self.logger.info(f"\nValid EP: {episode}/{num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
-                                   \nReward: {episode_reward:.2f}\
+                                   \nReward: {valid_reward:.2f}\
                                    \nBalance: ${info['balance']:.2f}\
-                                   \nTotal Return: {info['total_return_pct']:.2%}%\
-                                   \nTotal Shares Traded: {info['total_shares_purchased']}\
+                                   \nGross Return (Pre-Fee): {gross_return_pct:.2%}\
+                                   \nNet Return (Post-Fee): {net_return_pct:.2%} {'POSITIVE' if net_return_pct > 0 else ''}\
+                                   \nFee Impact: {fee_impact:.2%}\
+                                   \nTotal Trade Count: {trade_execution_count}\
+                                   \nTurnover Ratio: {turnover_ratio:.2%}\
+                                   \nAvg Hold Time: {avg_hold_time}\
+                                   \nTotal Shares Traded: {info['total_shares_sold']}\
                                    \n{'='*50}")
         
-        validation_reward = total_reward / num_episodes
-        if self.logger:
-            self.logger.info(f"Validation Reward: {validation_reward:.2f}")
-        return validation_reward
-    
     def _plot_training_curves(self, timestamp: str) -> None:
         result_dir = self.results_dir / f"training_{timestamp}"
+        loss_dir = result_dir / "loss"
+        metrics_dir = result_dir / "metrics"
         create_directory(result_dir)
-        
-        def plot_learning_curve(data: List[float], title: str, xlabel: str, ylabel: str, ma_window: int = 100, save_path: Union[str, Path] = None) -> None:        
+        create_directory(loss_dir)
+        create_directory(metrics_dir)
+            
+        metrics = [
+            {
+                "train_data": self.train_returns,
+                "valid_data": self.valid_returns,
+                "title": "Returns",
+                "ylabel": "Return",
+                "filename": "returns.png"
+            },
+            {
+                "train_data": self.train_rewards,
+                "valid_data": self.valid_rewards,
+                "title": "Rewards",
+                "ylabel": "Reward",
+                "filename": "rewards.png"
+            },
+            {
+                "train_data": self.train_fee_impacts,
+                "valid_data": self.valid_fee_impacts,
+                "title": "Fee Impacts",
+                "ylabel": "Fee Impact",
+                "filename": "fee_impacts.png"
+            },
+            {
+                "train_data": self.train_total_trade_counts,
+                "valid_data": self.valid_total_trade_counts,
+                "title": "Trade Counts",
+                "ylabel": "Trade Count",
+                "filename": "total_trade_counts.png"
+            },
+            {
+                "train_data": self.train_turnover_ratios,
+                "valid_data": self.valid_turnover_ratios,
+                "title": "Turnover Ratios",
+                "ylabel": "Turnover Ratio",
+                "filename": "turnover_ratios.png"
+            },
+            {
+                "train_data": self.train_avg_hold_times,
+                "valid_data": self.valid_avg_hold_times,
+                "title": "Average Hold Times",
+                "ylabel": "Average Hold Time",
+                "filename": "avg_hold_times.png"
+            },
+        ]
+
+        loss_plots = [
+            {
+                "key": "actor_loss",
+                "title": "Actor Losses",
+                "ylabel": "Loss",
+                "filename": "actor_loss.png"
+            },
+            {
+                "key": "critic_loss",
+                "title": "Critic Losses",
+                "ylabel": "Loss",
+                "filename": "critic_loss.png"
+            },
+            {
+                "key": "alpha_loss",
+                "title": "Alpha Losses",
+                "ylabel": "Loss",
+                "filename": "alpha_loss.png"
+            },
+            {
+                "key": "entropy",
+                "title": "Policy Entropy",
+                "ylabel": "Entropy",
+                "filename": "entropy.png"
+            },
+            {
+                "key": "alpha",
+                "title": "Alpha",
+                "ylabel": "Alpha",
+                "filename": "alpha.png"
+            },
+        ]
+
+        for metric in metrics:
+            train_data = metric["train_data"]
+            valid_data = metric["valid_data"]
+            title = metric["title"]
+            ylabel = metric["ylabel"]
+            filename = metric["filename"]
+
             plt.figure(figsize=(10, 6))
-            plt.plot(data, alpha=0.3, color='blue', label=ylabel)
-            
-            if len(data) >= ma_window:
-                ma_rewards = pd.Series(data).rolling(window=ma_window).mean().values
-                plt.plot(ma_rewards, color='red', label=f'{ma_window} Moving Average')
-            
+            plt.plot(train_data, alpha=0.3, color='blue', label=f'Train {ylabel}')
+            if len(train_data) >= self.valid_interval:
+                ma = pd.Series(train_data).rolling(window=self.valid_interval).mean().values
+                plt.plot(ma, color='blue', linewidth=1.5, label=f'Train {self.valid_interval}-ep MA')
+            if valid_data:
+                x_vals = list(range(self.valid_interval, self.valid_interval * len(valid_data) + 1, self.valid_interval))
+                plt.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
             plt.title(title)
-            plt.xlabel(xlabel)
+            plt.xlabel("Episode")
             plt.ylabel(ylabel)
             plt.legend()
             plt.grid(True, alpha=0.3)
-        
-            if save_path:
-                create_directory(os.path.dirname(save_path))
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
+            plt.savefig(metrics_dir / filename, dpi=300, bbox_inches='tight')
             plt.close()
-        
-        def plot_actions() -> None:
-            # Plot training prices with buy/sell actions overlaid
-            if self.train_actions:
-                plt.figure(figsize=(12, 6))
-                # Use the first len(train_actions) prices from the training environment
-                prices = self.train_env.prices[:len(self.train_actions)]
-                x_idx = np.arange(len(prices))
-                plt.plot(x_idx, prices.values, color='black', linewidth=1.0, label='Price')
-                
-                train_buys_x, train_buys_y, train_buys_c = [], [], []
-                train_sells_x, train_sells_y, train_sells_c = [], [], []
-                
-                for i, a in enumerate(self.train_actions):
-                    # a is typically a numpy array of shape (1,)
-                    if isinstance(a, np.ndarray):
-                        val = float(a[0])
-                    elif isinstance(a, (list, tuple)):
-                        val = float(a[0])
-                    else:
-                        val = float(a)
-                    
-                    if val > 0.0:
-                        # Buy: green upward triangle at the price level, alpha ~ action strength
-                        alpha = max(0.0, min(1.0, val))
-                        train_buys_x.append(i)
-                        train_buys_y.append(prices[i])
-                        train_buys_c.append((0.0, 0.8, 0.0, alpha))
-                    elif val < 0.0:
-                        # Sell: red downward triangle at the price level, alpha ~ |action|
-                        alpha = max(0.0, min(1.0, -val))
-                        train_sells_x.append(i)
-                        train_sells_y.append(prices[i])
-                        train_sells_c.append((0.8, 0.0, 0.0, alpha))
-                    # val == 0.0 is a hold -> ignore
-                
-                ax = plt.gca()
-                if train_buys_x:
-                    ax.scatter(train_buys_x, train_buys_y, marker='^', c=train_buys_c, edgecolors='none', label='Train Buy')
-                if train_sells_x:
-                    ax.scatter(train_sells_x, train_sells_y, marker='v', c=train_sells_c, edgecolors='none', label='Train Sell')
-                
-                ax.set_title('Training Price and Actions')
-                ax.set_xlabel('Step')
-                ax.set_ylabel('Price')
-                ax.grid(True, alpha=0.3)
-                ax.legend()
-                plt.savefig(result_dir / "train_price_actions.png", dpi=300, bbox_inches='tight')
-                plt.close()
-            
-            # Plot validation prices with buy/sell actions overlaid
-            if self.valid_actions:
-                plt.figure(figsize=(12, 6))
-                prices = self.valid_env.prices[:len(self.valid_actions)]
-                x_idx = np.arange(len(prices))
-                plt.plot(x_idx, prices.values, color='black', linewidth=1.0, label='Price')
-                
-                valid_buys_x, valid_buys_y, valid_buys_c = [], [], []
-                valid_sells_x, valid_sells_y, valid_sells_c = [], [], []
-                
-                for i, a in enumerate(self.valid_actions):
-                    if isinstance(a, np.ndarray):
-                        val = float(a[0])
-                    elif isinstance(a, (list, tuple)):
-                        val = float(a[0])
-                    else:
-                        val = float(a)
-                    
-                    if val > 0.0:
-                        alpha = max(0.0, min(1.0, val))
-                        valid_buys_x.append(i)
-                        valid_buys_y.append(prices[i])
-                        valid_buys_c.append((0.0, 0.8, 0.0, alpha))
-                    elif val < 0.0:
-                        alpha = max(0.0, min(1.0, -val))
-                        valid_sells_x.append(i)
-                        valid_sells_y.append(prices[i])
-                        valid_sells_c.append((0.8, 0.0, 0.0, alpha))
-                
-                ax = plt.gca()
-                if valid_buys_x:
-                    ax.scatter(valid_buys_x, valid_buys_y, marker='^', c=valid_buys_c, edgecolors='none', label='Valid Buy')
-                if valid_sells_x:
-                    ax.scatter(valid_sells_x, valid_sells_y, marker='v', c=valid_sells_c, edgecolors='none', label='Valid Sell')
-                
-                ax.set_title('Validation Price and Actions')
-                ax.set_xlabel('Step')
-                ax.set_ylabel('Price')
-                ax.grid(True, alpha=0.3)
-                ax.legend()
-                plt.savefig(result_dir / "valid_price_actions.png", dpi=300, bbox_inches='tight')
-                plt.close()
-        
-        plot_learning_curve(
-            data=self.episode_returns,
-            title="Training Returns",
-            xlabel="Episode",
-            ylabel="Return",
-            ma_window=10,
-            save_path=result_dir / "episode_returns.png"
-        )
-        
-        plot_learning_curve(
-            data=self.episode_rewards,
-            title="Training Rewards",
-            xlabel="Episode",
-            ylabel="Reward",
-            ma_window=10,
-            save_path=result_dir / "episode_rewards.png"
-        )
         
         if self.train_losses:
-            plt.figure(figsize=(10, 6))
-            plt.plot([loss["actor_loss"] for loss in self.train_losses])
-            plt.title('Actor Losses')
-            plt.xlabel('Episode')
-            plt.ylabel('Loss')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "actor_loss.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot([loss["critic_loss"] for loss in self.train_losses])
-            plt.title('Critic Losses')
-            plt.xlabel('Episode')
-            plt.ylabel('Loss')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "critic_loss.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot([loss["alpha_loss"] for loss in self.train_losses])
-            plt.title('Alpha Losses')
-            plt.xlabel('Episode')
-            plt.ylabel('Loss')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "alpha_loss.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot([loss["entropy"] for loss in self.train_losses])
-            plt.title('Policy Entropy')
-            plt.xlabel('Episode')
-            plt.ylabel('Entropy')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "entropy.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot([loss["alpha"] for loss in self.train_losses])
-            plt.title('Alpha')
-            plt.xlabel('Episode')
-            plt.ylabel('Alpha')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "alpha.png", dpi=300, bbox_inches='tight')
-            plt.close()
-        
-        if self.valid_rewards:
-            plt.figure(figsize=(10, 6))
-            x_vals = list(range(self.validation_interval, self.validation_interval * len(self.valid_rewards) + 1, self.validation_interval))
-            plt.plot(x_vals, self.valid_rewards)
-            plt.title('Validation Rewards')
-            plt.xlabel('Episode')
-            plt.ylabel('Reward')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(result_dir / "valid_rewards.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-        if not self.randomize_trading_days:
-            plot_actions()
+            for loss in loss_plots:
+                plt.figure(figsize=(10, 6))
+                plt.plot([train_loss[loss["key"]] for train_loss in self.train_losses])
+                plt.title(loss["title"])
+                plt.xlabel("Episode")
+                plt.ylabel(loss["ylabel"])
+                plt.grid(True, alpha=0.3)
+                plt.savefig(loss_dir / loss["filename"], dpi=300, bbox_inches='tight')
+                plt.close()
         
         stats = {
-            "episode_rewards": self.episode_rewards,
+            "train_returns": self.train_returns,
+            "valid_returns": self.valid_returns,
+            "train_rewards": self.train_rewards,
             "valid_rewards": self.valid_rewards,
+            "train_fee_impacts": self.train_fee_impacts,
+            "valid_fee_impacts": self.valid_fee_impacts,
+            "train_total_trade_counts": self.train_total_trade_counts,
+            "valid_total_trade_counts": self.valid_total_trade_counts,
+            "train_turnover_ratios": self.train_turnover_ratios,
+            "valid_turnover_ratios": self.valid_turnover_ratios,
+            "train_avg_hold_times": self.train_avg_hold_times,
+            "valid_avg_hold_times": self.valid_avg_hold_times,
             "train_losses": self.train_losses,
             "train_actions": self.train_actions,
             "valid_actions": self.valid_actions
@@ -404,12 +366,13 @@ class Trainer:
         torch.save(stats, result_dir / "training_stats.pth")
         
 def main():
-    np.random.seed(42)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
     
     ticker = 'TSLA'
-    train_data_dir = f'{DATA_DIR}/preprocessed/{ticker}/{ticker}_train.csv'
+    train_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
     train_data, _, _ = load_stock_data(train_data_dir)
-    valid_data_dir = f'{DATA_DIR}/preprocessed/{ticker}/{ticker}_valid.csv'
+    valid_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_valid.csv'
     valid_data, _, _ = load_stock_data(valid_data_dir)
     
     train_env = Environment(data=train_data)
@@ -429,7 +392,7 @@ def main():
         randomize_trading_days=True,
         num_episodes=200,
         batch_size=256,
-        validation_interval=10,
+        valid_interval=10,
         save_interval=50,
         logger=Logger()
     )
