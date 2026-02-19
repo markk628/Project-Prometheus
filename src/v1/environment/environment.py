@@ -17,7 +17,7 @@ class Environment:
         transaction_fee_percent: float=TRANSACTION_FEE_PERCENT,
         logger: Optional[Logger]=None
     ):
-        self.data = data.drop(['timestamp', 'close'], axis=1)
+        self.data = data.drop(['timestamp', 'close'], axis=1).to_numpy(dtype=np.float32)
         self.prices = data['close'].to_numpy()
         self.timestamps = data['timestamp'].to_numpy()
         self.market_open_idx = data[data['timestamp'].str.contains('14:30:00')].index.to_numpy()
@@ -147,10 +147,10 @@ class Environment:
         # Pad data if length is insufficient
         if start_idx == 0 and end_idx - start_idx < self.window_size:
             market_data = np.zeros((self.window_size, self.feature_dim), dtype=np.float32)
-            actual_data = self.data.iloc[start_idx:end_idx].values
+            actual_data = self.data[start_idx:end_idx]
             market_data[-len(actual_data):] = actual_data
         else:
-            market_data = self.data.iloc[start_idx:end_idx].values
+            market_data = self.data[start_idx:end_idx]
             
             if len(market_data) < self.window_size:
                 padding = np.zeros((self.window_size - len(market_data), self.feature_dim), dtype=np.float32)
