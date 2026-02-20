@@ -415,7 +415,7 @@ class DataPreprocessor:
         df = self._add_temporal_patterns(df)
         df['log_return_1'] = np.log(df['close'] / df['close'].shift(1))
         df['volume_log'] = np.log1p(df['volume']) # TODO volume_log_norm = (volume_log - volume_log.mean()) / volume_log.std() instead of scaling use this instead MAKE SURE THERE IS NO DATA LEAK
-        df['close_vwap_deviation'] = (df["close"] - df["vwap"]) / df["vwap"]
+        df['price_vwap_distance'] = (df["close"] - df["vwap"]) / df["vwap"]
         df = df.drop(['open', 'high', 'low', 'transactions', 'volume', 'vwap'], axis=1) 
         
         df = self._drop_rows_before_timestamp(df, timestamp)
