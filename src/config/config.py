@@ -39,10 +39,17 @@ DATA_END_DATE = '1746573780000'   # 2025-05-06 11:23 PM UTC
 CUTOFF_TIMESTAMP = '2021-05-06 08:00:00' 
 
 # Trading env config
-WINDOW_SIZE = 20
+WINDOW_SIZE = 60
 INITIAL_BALANCE = 10000.0       # Initial trading balance
 MAX_TRADING_UNITS = 10          
-TRANSACTION_FEE_PERCENT = 0.001 # Trade transcation fee percentage
+# Regularly check https://alpaca.markets/support/regulatory-fees for updated fees
+SEC_FEE = 0                 # per SEC_FEE_PRINCIPAL of principal (sells only) - this fee is rounded up to the nearest penny
+SEC_FEE_PRINCIPAL = 1000000
+TAF_FEE = 0.000166          # per share (sells only) — this fee is applied on a per-trade basis, rounded up to the nearest penny, 
+TAF_FEE_CAP = 8.30          # and capped at $8.30
+CAT_FEE = 0.0000265         # charged per trade
+SPREAD = 0.02               # currently for minute data 0.05 or 0.10 for daily data
+SLIPPAGE = 0.0005           # currently for minute data 0.001 for daily data
 
 # Model hyperparameters config
 HIDDEN_DIM = 256            # Hidden dim size
@@ -54,11 +61,12 @@ GAMMA = 0.99                # Discount factor (higher = cares more about long te
 TAU = 0.005                 # Controls how soft the target network is updated
 REPLAY_BUFFER_SIZE = 300000 # Replay buffer's max size (increase/decrease based on ram size)
 TARGET_UPDATE_INTERVAL = 1
+SEED = 42
 
 # Training config
 BATCH_SIZE = 256
 NUM_EPISODES = 1000
-VALIDATION_INTERVAL = 10
+VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
 
 MINUTES_PER_TRADING_DAY = 390   # 9:30 AM to 3:59 PM EST (regular market)
