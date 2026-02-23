@@ -184,11 +184,6 @@ class Trainer:
                               \nPositive Return Training: {positive_return_train}/{self.num_episodes}\
                               \nPositive Returns Validation: {positive_return_valid}/{int(self.num_episodes / self.valid_interval)}")
         
-        print('Train Invalid Actions')
-        print(self.train_invalid_actions_counts)
-        print('Valid Invalid Actions')
-        print(self.valid_invalid_actions_counts)
-        
         return {
             "train_rewards": self.train_rewards,
             "valid_rewards": self.valid_rewards,
@@ -312,13 +307,13 @@ class Trainer:
                 "ylabel": "Average Hold Time",
                 "filename": "avg_hold_times.png"
             },
-            {
-                "train_data": self.train_invalid_actions_counts,
-                "valid_data": self.valid_invalid_actions_counts,
-                "title": "Invalid Actions",
-                "ylabel": "Invalid Action Count",
-                "filename": "invalid_action_counts.png"
-            }
+            # {
+            #     "train_data": self.train_invalid_actions_counts,
+            #     "valid_data": self.valid_invalid_actions_counts,
+            #     "title": "Invalid Actions",
+            #     "ylabel": "Invalid Action Count",
+            #     "filename": "invalid_action_counts.png"
+            # }
         ]
 
         loss_plots = [
@@ -369,6 +364,41 @@ class Trainer:
             if valid_data:
                 x_vals = list(range(self.valid_interval, self.valid_interval * len(valid_data) + 1, self.valid_interval))
                 plt.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
+            
+            if title in ["Returns", "Rewards"]:
+                train_above_zero = sum(1 for x in train_data if x > 0)
+                train_total = len(train_data)
+
+                train_pct = train_above_zero / train_total if train_total > 0 else 0
+
+                if valid_data:
+                    valid_above_zero = sum(1 for x in valid_data if x > 0)
+                    valid_total = len(valid_data)
+                    valid_pct = valid_above_zero / valid_total if valid_total > 0 else None
+                else:
+                    valid_above_zero = 0
+                    valid_total = 0
+                    valid_pct = None
+
+                if valid_pct is not None:
+                    valid_pct_str = f"{valid_pct:.1%}"
+                else:
+                    valid_pct_str = "N/A"
+
+                stats_text = (
+                    f"Train > 0: {train_above_zero}/{train_total} ({train_pct:.1%})\n"
+                    f"Valid > 0: {valid_above_zero}/{valid_total} ({valid_pct_str})"
+                )
+
+                plt.text(
+                    0.02, 0.98,
+                    stats_text,
+                    transform=plt.gca().transAxes,
+                    fontsize=10,
+                    verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+                )    
+            
             plt.title(title)
             plt.xlabel("Episode")
             plt.ylabel(ylabel)
