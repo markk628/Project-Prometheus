@@ -39,7 +39,7 @@ DATA_END_DATE = '1746573780000'   # 2025-05-06 11:23 PM UTC
 CUTOFF_TIMESTAMP = '2021-05-06 08:00:00' 
 
 # Trading env config
-WINDOW_SIZE = 20
+WINDOW_SIZE = 60
 INITIAL_BALANCE = 10000.0       # Initial trading balance
 MAX_TRADING_UNITS = 10          
 # Regularly check https://alpaca.markets/support/regulatory-fees for updated fees

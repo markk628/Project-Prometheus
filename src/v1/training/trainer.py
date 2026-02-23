@@ -56,6 +56,8 @@ class Trainer:
         self.valid_turnover_ratios = []
         self.train_avg_hold_times = []
         self.valid_avg_hold_times = []
+        self.train_invalid_actions_counts = []
+        self.valid_invalid_actions_counts = []
         
         self.train_losses = []
         self.train_actions = []
@@ -85,6 +87,7 @@ class Trainer:
             
             while not done:
                 action = self.agent.select_action(state)
+                action = self.train_env.mask_action(action)
                 next_state, reward, done, info = self.train_env.step(action)
                 self.agent.replay_buffer.push(state, action, reward, next_state, done)
                 self.train_actions.append(action)
@@ -116,6 +119,9 @@ class Trainer:
             avg_hold_time = info['avg_hold_time']
             self.train_avg_hold_times.append(avg_hold_time)
             
+            invalid_actions_count = info['invalid_acitons_count']
+            self.train_invalid_actions_counts.append(invalid_actions_count)
+            
             if self.train_env.current_step_in_episode > 0:
                 for k in train_loss:
                     train_loss[k] /= self.train_env.current_step_in_episode
@@ -143,6 +149,7 @@ class Trainer:
                                    \nTotal Trade Count: {trade_execution_count}\
                                    \nTurnover Ratio: {turnover_ratio:.2%}\
                                    \nAvg Hold Time: {avg_hold_time}\
+                                   \nInvalid Actions: {invalid_actions_count}\
                                    \nTotal Shares Traded: {info['total_shares_sold']}\
                                    \n{'='*50}")
             
@@ -177,6 +184,11 @@ class Trainer:
                               \nPositive Return Training: {positive_return_train}/{self.num_episodes}\
                               \nPositive Returns Validation: {positive_return_valid}/{int(self.num_episodes / self.valid_interval)}")
         
+        print('Train Invalid Actions')
+        print(self.train_invalid_actions_counts)
+        print('Valid Invalid Actions')
+        print(self.valid_invalid_actions_counts)
+        
         return {
             "train_rewards": self.train_rewards,
             "valid_rewards": self.valid_rewards,
@@ -196,6 +208,7 @@ class Trainer:
             
             while not done:
                 action = self.agent.select_action(state, validate=True)
+                action = self.valid_env.mask_action(action)
                 next_state, reward, done, info = self.valid_env.step(action)
                 state = next_state
                 valid_reward += reward
@@ -219,6 +232,9 @@ class Trainer:
             avg_hold_time = info['avg_hold_time']
             self.valid_avg_hold_times.append(avg_hold_time)
             
+            invalid_actions_count = info['invalid_acitons_count']
+            self.valid_invalid_actions_counts.append(invalid_actions_count)
+            
             episode_start_date = self.valid_env.timestamps[self.valid_env.current_step - self.valid_env.current_step_in_episode]
             episode_end_date = self.valid_env.timestamps[self.valid_env.current_step]
         
@@ -241,6 +257,7 @@ class Trainer:
                                    \nTotal Trade Count: {trade_execution_count}\
                                    \nTurnover Ratio: {turnover_ratio:.2%}\
                                    \nAvg Hold Time: {avg_hold_time}\
+                                   \nInvalid Actions: {invalid_actions_count}\
                                    \nTotal Shares Traded: {info['total_shares_sold']}\
                                    \n{'='*50}")
         
@@ -295,6 +312,13 @@ class Trainer:
                 "ylabel": "Average Hold Time",
                 "filename": "avg_hold_times.png"
             },
+            {
+                "train_data": self.train_invalid_actions_counts,
+                "valid_data": self.valid_invalid_actions_counts,
+                "title": "Invalid Actions",
+                "ylabel": "Invalid Action Count",
+                "filename": "invalid_action_counts.png"
+            }
         ]
 
         loss_plots = [
@@ -405,6 +429,9 @@ def main():
         portfolio_state_len=portfolio_dim
     )
     
+    models_dir = f"{MODELS_DIR}/v1"
+    results_dir = f"{RESULTS_DIR}/v1"
+    
     trainer = Trainer(
         agent=agent,
         train_env=train_env,
@@ -414,6 +441,8 @@ def main():
         batch_size=256,
         valid_interval=10,
         save_interval=50,
+        models_dir=models_dir,
+        results_dir=results_dir,
         logger=Logger()
     )
     

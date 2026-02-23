@@ -30,7 +30,7 @@ class Environment:
         self.market_open_idx = data[data['timestamp'].str.contains('14:30:00')].index.to_numpy()
         self.window_size = window_size
         self.initial_balance = initial_balance
-        # TODO make max_tradin_units dynamic using market data
+        # TODO make max_trading_units dynamic using market data
         # something like this
         '''
         vol_factor = rolling_vol / target_vol
@@ -73,6 +73,8 @@ class Environment:
         
         # self.recent_returns = deque(maxlen=self.window_size)
         # self.return_volatility = 1e-9
+        
+        self.invalid_acitons_count = 0
         
         # Episode history
         self.states_history = []
@@ -118,6 +120,8 @@ class Environment:
         # self.recent_returns = deque(maxlen=self.window_size)
         # self.return_volatility = 1e-9
         
+        self.invalid_acitons_count = 0
+        
         # History
         self.states_history = []
         self.actions_history = []
@@ -125,6 +129,48 @@ class Environment:
         self.portfolio_values_history = []
         
         return self._get_observation()
+    
+    def mask_action(self, action: float) -> float:
+        market_price = self._get_current_price()
+
+        if market_price <= 0:
+            return 0
+
+        # BUY
+        if action > 0:
+            requested_shares = int(self.max_trading_units * action)
+
+            if requested_shares <= 0:
+                return 0
+
+            max_affordable = int(self.balance / market_price)
+            shares_to_buy = min(requested_shares, max_affordable)
+
+            if shares_to_buy <= 0:
+                return 0
+
+            exec_price, fees, notional = self._calculate_transaction_cost(
+                side="buy",
+                shares=shares_to_buy,
+                market_price=market_price
+            )
+
+            total_cost = notional + fees
+
+            if self.balance < total_cost:
+                return 0
+
+        # SELL
+        elif action < 0:
+            requested_shares = int(self.max_trading_units * abs(action))
+
+            if requested_shares <= 0:
+                return 0
+
+            if self.shares_held <= 0:
+                return 0
+
+        return action
     
     def step(self, action: float) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         # Record action
@@ -259,7 +305,7 @@ class Environment:
         previous_shares = self.shares_held
         
         if not '20:59:00' in self.timestamps[self.current_step]:
-            if action_value > 0:
+            if action_value > 0: # Buy
                 market_price = self._get_current_price()
                 max_shares = int(self.balance / market_price)
                 shares_to_buy = min(max_shares, int(self.max_trading_units * action_value))
@@ -281,8 +327,12 @@ class Environment:
                         self.shares_traded = shares_to_buy
                         self.total_dollar_traded += notional
                         self.trade_execution_count += 1
+                    else:
+                        self.invalid_acitons_count += 1
+                else:
+                    self.invalid_acitons_count += 1
 
-            elif action_value < 0:
+            elif action_value < 0: # Sell
                 shares_to_sell = min(
                     self.shares_held,
                     int(self.max_trading_units * abs(action_value))
@@ -306,10 +356,15 @@ class Environment:
                     self.shares_traded = shares_to_sell
                     self.total_dollar_traded += notional
                     self.trade_execution_count += 1
+                else:
+                    self.invalid_acitons_count += 1
 
-            else: # hold
+            else: # Hold
                 self.shares_traded = 0
         else:
+            if action_value >= 0:
+                self.invalid_acitons_count += 1
+                
             if self.shares_held > 0:
                 market_price = self._get_current_price()
                 shares_to_sell = self.shares_held
@@ -407,7 +462,8 @@ class Environment:
             'total_transaction_fee': self.total_transaction_fee,
             'trade_execution_count': self.trade_execution_count,
             'turnover_ratio': self.total_dollar_traded / self.initial_balance,
-            'avg_hold_time': np.array(self.hold_times).mean() if self.hold_times else 0
+            'avg_hold_time': np.array(self.hold_times).mean() if self.hold_times else 0,
+            'invalid_acitons_count': self.invalid_acitons_count
         }
         
     def render(self) -> None:
