@@ -499,7 +499,7 @@ def main():
     
     ticker = 'TSLA'
     data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
-    data, _, _ = load_stock_data(data_dir)
+    data = load_stock_data(data_dir)
     
     env = Environment(data=data, logger=Logger())
     

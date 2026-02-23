@@ -154,7 +154,7 @@ def main():
     
     ticker = 'TSLA'
     test_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_test.csv'
-    test_data, _, _ = load_stock_data(test_data_dir)
+    test_data = load_stock_data(test_data_dir)
     
     action_dim = 1
     env = Environment(data=test_data)

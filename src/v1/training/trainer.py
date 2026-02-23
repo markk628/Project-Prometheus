@@ -413,9 +413,9 @@ def main():
     
     ticker = 'TSLA'
     train_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
-    train_data, _, _ = load_stock_data(train_data_dir)
+    train_data = load_stock_data(train_data_dir)
     valid_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_valid.csv'
-    valid_data, _, _ = load_stock_data(valid_data_dir)
+    valid_data = load_stock_data(valid_data_dir)
     
     train_env = Environment(data=train_data)
     valid_env = Environment(data=valid_data)

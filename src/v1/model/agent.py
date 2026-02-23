@@ -44,6 +44,7 @@ class Agent:
         
         self.actor = Actor(
             input_shape=input_shape,
+            portfolio_state_length=portfolio_state_len,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
             device=device
@@ -51,6 +52,7 @@ class Agent:
         
         self.critic = Critic(
             input_shape=input_shape,
+            portfolio_state_length=portfolio_state_len,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
             device=device
@@ -58,6 +60,7 @@ class Agent:
         
         self.critic_target = Critic(
             input_shape=input_shape,
+            portfolio_state_length=portfolio_state_len,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
             device=device
@@ -308,7 +311,7 @@ def main():
     
     ticker = 'TSLA'
     data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
-    data, _, _ = load_stock_data(data_dir)
+    data = load_stock_data(data_dir)
     
     env = Environment(data=data, logger=Logger())
     action_dim = env.action_space.shape[0]
