@@ -76,7 +76,7 @@ def format_duration(seconds: float):
 
     return ' '.join(parts)
 
-def load_stock_data(data_path: str, start_timestamp: Optional[pd.Timestamp]=None) -> Tuple[pd.DataFrame, datetime, datetime]:
+def load_stock_data(data_path: str, start_timestamp: Optional[str]=None, end_timestamp: Optional[str]=None) -> pd.DataFrame:
     """
     Get saved csv data and filter to regular market hours
     
@@ -93,19 +93,9 @@ def load_stock_data(data_path: str, start_timestamp: Optional[pd.Timestamp]=None
     df = pd.read_csv(data_path)
 
     if start_timestamp:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        if start_timestamp.tz is not None:
-            if df['timestamp'].dt.tz is None:
-                df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
-            df['timestamp'] = df['timestamp'].dt.tz_convert(start_timestamp.tz)
-        else:
-            if df['timestamp'].dt.tz is not None:
-                df['timestamp'] = df['timestamp'].dt.tz_convert('UTC').dt.tz_localize(None)
-        
         df = df[df['timestamp'] >= start_timestamp]
+    
+    if end_timestamp:
+        df = df[df['timestamp'] < end_timestamp]
         
-    start_date = pd.to_datetime(df['timestamp'].iloc[0]).to_pydatetime()
-    end_date = pd.to_datetime(df['timestamp'].iloc[-1]).to_pydatetime()
-        
-    return df, start_date, end_date
+    return df
