@@ -9,6 +9,7 @@ class Actor(nn.Module):
     def __init__(
         self,
         input_shape: Tuple[int, int], # (window_size, feature_dim)
+        portfolio_state_length: int,
         action_dim: int = 1,
         hidden_dim: int = HIDDEN_DIM,
         log_std_min: float = -20.0,
@@ -32,7 +33,7 @@ class Actor(nn.Module):
         
         conv_output_size = 128 * (self.window_size // 4)
         
-        self.portfolio_fc = nn.Linear(2, hidden_dim // 4)
+        self.portfolio_fc = nn.Linear(portfolio_state_length, hidden_dim // 4)
         
         self.fc1 = nn.Linear(conv_output_size + hidden_dim // 4, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
@@ -66,8 +67,8 @@ class Actor(nn.Module):
         # Process portfolio state
         portfolio_state = state['portfolio_state']
         
-        if len(portfolio_state.shape) == 1: # (2,)
-            portfolio_state = portfolio_state.unsqueeze(0) # (1, 2)
+        if len(portfolio_state.shape) == 1: # (portfolio_state_length,)
+            portfolio_state = portfolio_state.unsqueeze(0) # (1, portfolio_state_length)
         
         x = F.relu(self.conv1(market_data))
         x = self.pool(x)
@@ -126,6 +127,7 @@ class Critic(nn.Module):
     def __init__(
         self,
         input_shape: Tuple[int, int], # (window_size, feature_dim)
+        portfolio_state_length: int,
         action_dim: int = 1,
         hidden_dim: int = HIDDEN_DIM,
         device: torch.device = DEVICE
@@ -149,8 +151,8 @@ class Critic(nn.Module):
         
         conv_output_size = 128 * (self.window_size // 4)
         
-        self.q1_portfolio_fc = nn.Linear(2, hidden_dim // 4)
-        self.q2_portfolio_fc = nn.Linear(2, hidden_dim // 4)
+        self.q1_portfolio_fc = nn.Linear(portfolio_state_length, hidden_dim // 4)
+        self.q2_portfolio_fc = nn.Linear(portfolio_state_length, hidden_dim // 4)
         
         self.q1_action_fc = nn.Linear(action_dim, hidden_dim // 4)
         self.q2_action_fc = nn.Linear(action_dim, hidden_dim // 4)
@@ -189,8 +191,8 @@ class Critic(nn.Module):
         # Process portfolio state
         portfolio_state = state['portfolio_state']
         
-        if len(portfolio_state.shape) == 1: # (2,)
-            portfolio_state = portfolio_state.unsqueeze(0) # (1, 2)
+        if len(portfolio_state.shape) == 1: # (portfolio_state_length,)
+            portfolio_state = portfolio_state.unsqueeze(0) # (1, portfolio_state_length)
         
         if len(action.shape) == 1: # (action_dim,)
             action = action.unsqueeze(0) # (1, action_dim)
