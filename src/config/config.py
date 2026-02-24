@@ -69,14 +69,9 @@ NUM_EPISODES = 1000
 VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
 
-MINUTES_PER_TRADING_DAY = 390   # 9:30 AM to 3:59 PM EST (regular market)
-MINUTES_PER_EXTENDED_DAY = 959  # 4:00 AM to 7:59 PM EST (full extended hours)
-MINUTES_PER_ENHANCED_DAY = 449  # 8:30 AM to 3:59 PM EST (1hr pre + regular)
-
 # Evaluation config
 ANNUAL_RISK_FREE_RATE = 0.02
 TRADING_DAYS_PER_YEAR = 252
-MINUTES_PER_YEAR = TRADING_DAYS_PER_YEAR * MINUTES_PER_TRADING_DAY
 
 # Device config
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
