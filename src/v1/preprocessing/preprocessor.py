@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import pandas as pd
+import pandas_market_calendars as mcal
 import talib as ta
 from typing import List, Optional, Tuple
 
@@ -79,16 +80,59 @@ class DataPreprocessor:
         :rtype: pd.DataFrame
         """
         if self.logger:
-            self.logger.info('Handling gaps...')
-            
-        df = df.set_index('timestamp').resample('min').asfreq()
-        df = df.between_time('14:30', '20:59').copy()
-        cols_to_ffill = ['open', 'high', 'low', 'close', 'vwap']
-        cols_to_fillna = ['volume', 'transactions']
-        df[cols_to_ffill] = df[cols_to_ffill].ffill()
-        df[cols_to_fillna] = df[cols_to_fillna].fillna(0)
-        df = df[~df.index.weekday.isin([5, 6])]
-        return df.reset_index()
+            self.logger.info("Handling gaps...")
+
+        df = df.set_index("timestamp")
+        df = df.tz_convert("America/New_York")
+        df = df.sort_index()
+
+        nyse = mcal.get_calendar("NYSE")
+        schedule = nyse.schedule(
+            start_date=df.index.min().date(),
+            end_date=df.index.max().date()
+        )
+
+        session_frames = []
+
+        for session_date, row in schedule.iterrows():
+
+            market_open = row["market_open"].tz_convert("America/New_York")
+            market_close = row["market_close"].tz_convert("America/New_York")
+
+            session_raw = df.loc[
+                (df.index >= market_open) &
+                (df.index < market_close)
+            ]
+
+            if session_raw.empty:
+                continue
+
+            full_index = pd.date_range(
+                start=market_open,
+                end=market_close - pd.Timedelta(minutes=1),
+                freq="1min",
+                tz="America/New_York"
+            )
+
+            session = session_raw.reindex(full_index)
+
+            price_cols = ["open", "high", "low", "close", "vwap"]
+            volume_cols = ["volume", "transactions"]
+
+            session[price_cols] = session[price_cols].ffill()
+            session[volume_cols] = session[volume_cols].fillna(0)
+
+            if session[price_cols].iloc[0].isna().any():
+                continue
+
+            session_frames.append(session)
+
+        if not session_frames:
+            raise ValueError("No valid sessions after gap handling.")
+
+        df_clean = pd.concat(session_frames)
+
+        return df_clean.reset_index().rename(columns={"index": "timestamp"})
     
     def _add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -358,11 +402,13 @@ class DataPreprocessor:
     
     def _split_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         def clip_first_and_last_day(df: pd.DataFrame) -> pd.DataFrame:
-            timestamps = pd.to_datetime(df['timestamp'])
-
-            first_day_idx = timestamps.dt.time.eq(pd.Timestamp("14:30:00").time()).idxmax()
-            last_day_idx = timestamps[::-1].dt.time.eq(pd.Timestamp("20:59:00").time()).idxmax() + 1
-            return df.iloc[first_day_idx: last_day_idx]
+            df['date'] = df['timestamp'].dt.date
+            valid_dates = df['date'].unique()
+            
+            if len(valid_dates) > 2:
+                df = df[df['date'].isin(valid_dates[1:-1])]
+            
+            return df.drop(columns=['date'])
             
         if self.logger:
             self.logger.info('Splitting data...')

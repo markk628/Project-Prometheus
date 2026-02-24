@@ -64,7 +64,7 @@ class Trainer:
         self.valid_actions = []
         
         if self.logger:
-            self.logger.info(f'Trainer initialized: {num_episodes} episodes, {batch_size} samples per batch')
+            self.logger.info(f"Trainer initialized: {num_episodes} episodes, {self.train_env.feature_dim} features, {self.train_env.observation_space['portfolio_state'].shape[0]} portfolio state, {batch_size} samples per batch")
             
     def train(self) -> Dict[str, List[float]]:
         start_time = time()
@@ -85,12 +85,16 @@ class Trainer:
             train_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, 'alpha': 0}
             done = False
             
+            self.train_actions = []
+            self.valid_actions = []
+            
             while not done:
                 action = self.agent.select_action(state)
-                action = self.train_env.mask_action(action)
-                next_state, reward, done, info = self.train_env.step(action)
+                action_value = action[0] if isinstance(action, np.ndarray) else action
+                action_value = self.train_env.mask_action(action_value)
+                next_state, reward, done, info = self.train_env.step(action_value)
                 self.agent.replay_buffer.push(state, action, reward, next_state, done)
-                self.train_actions.append(action)
+                self.train_actions.append(action_value)
                 
                 if len(self.agent.replay_buffer) > self.batch_size:
                     loss = self.agent.update_parameters(self.batch_size)
@@ -127,14 +131,15 @@ class Trainer:
                     train_loss[k] /= self.train_env.current_step_in_episode
             self.train_losses.append(train_loss)
             
-            episode_start_date = self.train_env.timestamps[self.train_env.current_step - self.train_env.current_step_in_episode]
-            episode_end_date = self.train_env.timestamps[self.train_env.current_step]
+            episode_start_date = self.train_env.timestamps[self.train_env.episode_start]
+            episode_end_date = self.train_env.timestamps[self.train_env.episode_end]
             
             if self.logger:
                 episode_train_rewards = np.array(episode_train_rewards)
                 self.logger.info(f"\nEP: {episode}/{self.num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
+                                   \nSteps: {self.train_env.current_step_in_episode}\
                                    \nReward Total: {train_reward:.2f}\
                                    \nReward Mean: {episode_train_rewards.mean()}\
                                    \nReward STD: {episode_train_rewards.std()}\
@@ -159,30 +164,17 @@ class Trainer:
                 self.validate()
             
             if episode % self.valid_interval == 0:
-                self._plot_training_curves(timestamp)
+                self._plot_training_curves(timestamp, episode)
         
         final_model_path = self.agent.save_model(self.models_dir, "final_", timestamp)
         if self.logger:
             self.logger.info(f"Final model saved: {final_model_path}")
         
-        self._plot_training_curves(timestamp)
+        self._plot_training_curves(timestamp, episode)
         
         if self.logger:
             total_time = time() - start_time
-            positive_return_train = 0
-            positive_return_valid = 0
-            
-            for train_return in self.train_returns:
-                if train_return > 0:
-                    positive_return_train += 1
-            
-            for valid_return in self.valid_returns:
-                if valid_return > 0:
-                    positive_return_valid += 1
-                    
-            self.logger.info(f"Training complete: {format_duration(total_time)})\
-                              \nPositive Return Training: {positive_return_train}/{self.num_episodes}\
-                              \nPositive Returns Validation: {positive_return_valid}/{int(self.num_episodes / self.valid_interval)}")
+            self.logger.info(f"Training complete: {format_duration(total_time)})")
         
         return {
             "train_rewards": self.train_rewards,
@@ -203,12 +195,13 @@ class Trainer:
             
             while not done:
                 action = self.agent.select_action(state, validate=True)
-                action = self.valid_env.mask_action(action)
-                next_state, reward, done, info = self.valid_env.step(action)
+                action_value = action[0] if isinstance(action, np.ndarray) else action
+                action_value = self.valid_env.mask_action(action_value)
+                next_state, reward, done, info = self.valid_env.step(action_value)
                 state = next_state
                 valid_reward += reward
                 episode_valid_rewards.append(reward)
-                self.valid_actions.append(action)
+                self.valid_actions.append(action_value)
             
             net_return_pct = info['net_return_pct']
             self.valid_returns.append(net_return_pct * 100)
@@ -230,14 +223,15 @@ class Trainer:
             invalid_actions_count = info['invalid_acitons_count']
             self.valid_invalid_actions_counts.append(invalid_actions_count)
             
-            episode_start_date = self.valid_env.timestamps[self.valid_env.current_step - self.valid_env.current_step_in_episode]
-            episode_end_date = self.valid_env.timestamps[self.valid_env.current_step]
+            episode_start_date = self.valid_env.timestamps[self.valid_env.episode_start]
+            episode_end_date = self.valid_env.timestamps[self.valid_env.episode_end]
         
             if self.logger:
                 episode_valid_rewards = np.array(episode_valid_rewards)
                 self.logger.info(f"\nValid EP: {episode}/{num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
+                                   \nSteps: {self.valid_env.current_step_in_episode}\
                                    \nReward Total: {valid_reward:.2f}\
                                    \nReward Mean: {episode_valid_rewards.mean()}\
                                    \nReward STD: {episode_valid_rewards.std()}\
@@ -256,13 +250,71 @@ class Trainer:
                                    \nTotal Shares Traded: {info['total_shares_sold']}\
                                    \n{'='*50}")
         
-    def _plot_training_curves(self, timestamp: str) -> None:
+    def _plot_price_with_actions(self, prices, actions, save_path, title: str) -> None:
+        if prices is None or actions is None:
+            return
+        
+        if len(prices) == 0 or len(actions) == 0:
+            return
+
+        actions = np.array(actions)
+
+        # Ensure same length
+        min_len = min(len(prices), len(actions))
+        prices = prices[:min_len]
+        actions = actions[:min_len]
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(prices, label="Price", color="blue", linewidth=1)
+
+        # Separate buys and sells (ignore 0)
+        buy_mask = actions > 0
+        sell_mask = actions < 0
+
+        buy_indices = np.where(buy_mask)[0]
+        sell_indices = np.where(sell_mask)[0]
+
+        # Plot buys (green up triangles)
+        for idx in buy_indices:
+            magnitude = min(abs(actions[idx]), 1.0)
+            plt.scatter(
+                idx,
+                prices[idx],
+                marker="^",
+                color="green",
+                alpha=magnitude,
+                s=60
+            )
+
+        # Plot sells (red down triangles)
+        for idx in sell_indices:
+            magnitude = min(abs(actions[idx]), 1.0)
+            plt.scatter(
+                idx,
+                prices[idx],
+                marker="v",
+                color="red",
+                alpha=magnitude,
+                s=60
+            )
+
+        plt.title(title)
+        plt.xlabel("Timestep")
+        plt.ylabel("Price")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+    
+    def _plot_training_curves(self, timestamp: str, episode: int) -> None:
         result_dir = self.results_dir / f"training_{timestamp}"
         loss_dir = result_dir / "loss"
         metrics_dir = result_dir / "metrics"
+        actions_dir = result_dir / "actions"
         create_directory(result_dir)
         create_directory(loss_dir)
         create_directory(metrics_dir)
+        create_directory(actions_dir)
             
         metrics = [
             {
@@ -356,48 +408,64 @@ class Trainer:
             ylabel = metric["ylabel"]
             filename = metric["filename"]
 
-            plt.figure(figsize=(10, 6))
-            plt.plot(train_data, alpha=0.3, color='blue', label=f'Train {ylabel}')
+            fig, ax = plt.subplots(figsize=(10, 6))
+            fig.tight_layout(rect=[0, 0, 0.75, 1])
+            
+            ax.plot(train_data, alpha=0.3, color='blue', label=f'Train {ylabel}')
             if len(train_data) >= self.valid_interval:
                 ma = pd.Series(train_data).rolling(window=self.valid_interval).mean().values
-                plt.plot(ma, color='blue', linewidth=1.5, label=f'Train {self.valid_interval}-ep MA')
+                ax.plot(ma, color='blue', linewidth=1.5, label=f'Train {self.valid_interval}-ep MA')
             if valid_data:
                 x_vals = list(range(self.valid_interval, self.valid_interval * len(valid_data) + 1, self.valid_interval))
-                plt.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
+                ax.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
             
+            train_above_zero = sum(1 for x in train_data if x > 0)
+            train_total = len(train_data)
+
+            train_pct = train_above_zero / train_total if train_total > 0 else 0
+
+            if valid_data:
+                valid_above_zero = sum(1 for x in valid_data if x > 0)
+                valid_total = len(valid_data)
+                valid_pct = valid_above_zero / valid_total if valid_total > 0 else None
+            else:
+                valid_above_zero = 0
+                valid_total = 0
+                valid_pct = None
+
+            if valid_pct is not None:
+                valid_pct_str = f"{valid_pct:.1%}"
+            else:
+                valid_pct_str = "N/A"
+
+            train_data = np.array(train_data)
+            valid_data = np.array(valid_data)
+            lines = []
+
             if title in ["Returns", "Rewards"]:
-                train_above_zero = sum(1 for x in train_data if x > 0)
-                train_total = len(train_data)
+                lines.append(f"Train > 0: {train_above_zero}/{train_total} ({train_pct:.1%})")
+                lines.append(f"Valid > 0: {valid_above_zero}/{valid_total} ({valid_pct_str})")
 
-                train_pct = train_above_zero / train_total if train_total > 0 else 0
+            lines.extend([
+                f"Train Mean: {train_data.mean():.6f}",
+                f"Valid Mean: {valid_data.mean():.6f}",
+                f"Train STD: {train_data.std():.6f}",
+                f"Valid STD: {valid_data.std():.6f}",
+                f"Train Max: {train_data.max():.6f}",
+                f"Valid Max: {valid_data.max():.6f}",
+                f"Train Min: {train_data.min():.6f}",
+                f"Valid Min: {valid_data.min():.6f}",
+            ])
 
-                if valid_data:
-                    valid_above_zero = sum(1 for x in valid_data if x > 0)
-                    valid_total = len(valid_data)
-                    valid_pct = valid_above_zero / valid_total if valid_total > 0 else None
-                else:
-                    valid_above_zero = 0
-                    valid_total = 0
-                    valid_pct = None
+            stats_text = "\n".join(lines)
 
-                if valid_pct is not None:
-                    valid_pct_str = f"{valid_pct:.1%}"
-                else:
-                    valid_pct_str = "N/A"
-
-                stats_text = (
-                    f"Train > 0: {train_above_zero}/{train_total} ({train_pct:.1%})\n"
-                    f"Valid > 0: {valid_above_zero}/{valid_total} ({valid_pct_str})"
-                )
-
-                plt.text(
-                    0.02, 0.98,
-                    stats_text,
-                    transform=plt.gca().transAxes,
-                    fontsize=10,
-                    verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-                )    
+            fig.text(
+                0.78, 0.85,
+                stats_text,
+                fontsize=10,
+                verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+            )  
             
             plt.title(title)
             plt.xlabel("Episode")
@@ -417,6 +485,20 @@ class Trainer:
                 plt.grid(True, alpha=0.3)
                 plt.savefig(loss_dir / loss["filename"], dpi=300, bbox_inches='tight')
                 plt.close()
+        
+        self._plot_price_with_actions(
+            prices=self.train_env.prices[self.train_env.current_step - self.train_env.current_step_in_episode: self.train_env.current_step],
+            actions=self.train_actions,
+            save_path=actions_dir / f"train_actions{episode}.png",
+            title="Train Price with Actions"
+        )
+        
+        self._plot_price_with_actions(
+            prices=self.valid_env.prices[self.valid_env.current_step - self.valid_env.current_step_in_episode: self.valid_env.current_step],
+            actions=self.valid_actions,
+            save_path=actions_dir / f"valid_actions{episode}.png",
+            title="Validation Price with Actions"
+        )
         
         stats = {
             "train_returns": self.train_returns,

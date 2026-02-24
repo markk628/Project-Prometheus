@@ -25,9 +25,22 @@ class Environment:
         logger: Optional[Logger]=None
     ):
         self.data = data.drop(['timestamp', 'close'], axis=1).to_numpy(dtype=np.float32)
+        self.feature_dim = self.data.shape[1]
+        self.data_length = self.data.shape[0]
         self.prices = data['close'].to_numpy()
         self.timestamps = data['timestamp'].to_numpy()
-        self.market_open_idx = data[data['timestamp'].str.contains('14:30:00')].index.to_numpy()
+        self.market_open_idx = (
+            data.index[data['timestamp'].str.contains('09:30:00')]
+            .to_numpy()
+        )
+        self.market_close_idx = np.roll(self.market_open_idx, -1) - 1
+        self.market_close_idx[-1] = len(data) - 1
+        self.dates = pd.to_datetime(data['timestamp'], utc=True).dt.date.values
+        self.market_close_idx = (
+            pd.Series(self.dates)
+            .ne(pd.Series(self.dates).shift(-1))
+            .to_numpy()
+        )
         self.window_size = window_size
         self.initial_balance = initial_balance
         # TODO make max_trading_units dynamic using market data
@@ -51,11 +64,7 @@ class Environment:
         self.slippage = slippage
         self.logger = logger
         
-        # Data
-        self.feature_dim = self.data.shape[1]
-        self.data_length = self.data.shape[0]
-        
-        # Env state
+        # Env state (Reset these every episode)
         self.current_step = 0
         self.current_step_in_episode = 0
         self.balance = initial_balance
@@ -75,6 +84,9 @@ class Environment:
         # self.return_volatility = 1e-9
         
         self.invalid_acitons_count = 0
+        self.episode_start = 0
+        self.episode_end = 0
+        self.episode_length = 0
         
         # Episode history
         self.states_history = []
@@ -100,6 +112,19 @@ class Environment:
         
         if self.logger:
             self.logger.info('Trading environment initialized')
+       
+    def _get_episode_bounds(self, current_step: int) -> Tuple[int, int, int]:
+        """
+        Returns (episode_start, episode_end, episode_length)
+        """
+        # Find which trading day idx
+        day_idx = np.searchsorted(self.market_open_idx, current_step, side="right") - 1
+        
+        episode_start = self.market_open_idx[day_idx]
+        episode_end = self.market_close_idx[day_idx]
+        episode_length = episode_end - episode_start + 1
+        
+        return episode_start, episode_end, episode_length   
             
     def reset(self) -> Dict[str, np.ndarray]:
         # State
@@ -121,6 +146,7 @@ class Environment:
         # self.return_volatility = 1e-9
         
         self.invalid_acitons_count = 0
+        self.episode_start, self.episode_end, self.episode_length = self._get_episode_bounds(self.current_step)
         
         # History
         self.states_history = []
@@ -182,6 +208,9 @@ class Environment:
         # Execute action
         self._execute_trade_action(action)
         
+        # Check if episode is over
+        done = self.current_step >= self.episode_end
+        
         # Step
         self.current_step += 1
         self.current_step_in_episode += 1
@@ -201,7 +230,6 @@ class Environment:
         # Record reward
         self.rewards_history.append(reward)
         
-        done = '20:59:00' in self.timestamps[self.current_step - 1]
         observation = self._get_observation()
         info = self._get_info()
         return observation, reward, done, info
@@ -301,14 +329,13 @@ class Environment:
                 self.logger.warning(f"Price is less than 0: {current_price}")
             return
         
-        action_value = action[0] if isinstance(action, np.ndarray) else action
         previous_shares = self.shares_held
         
-        if not '20:59:00' in self.timestamps[self.current_step]:
-            if action_value > 0: # Buy
+        if not self.current_step >= self.episode_end:
+            if action > 0: # Buy
                 market_price = self._get_current_price()
                 max_shares = int(self.balance / market_price)
-                shares_to_buy = min(max_shares, int(self.max_trading_units * action_value))
+                shares_to_buy = min(max_shares, int(self.max_trading_units * action))
                 
                 if shares_to_buy > 0:
                     exec_price, fees, notional = self._calculate_transaction_cost(
@@ -332,10 +359,10 @@ class Environment:
                 else:
                     self.invalid_acitons_count += 1
 
-            elif action_value < 0: # Sell
+            elif action < 0: # Sell
                 shares_to_sell = min(
                     self.shares_held,
-                    int(self.max_trading_units * abs(action_value))
+                    int(self.max_trading_units * abs(action))
                 )
                 
                 if shares_to_sell > 0:
@@ -362,7 +389,7 @@ class Environment:
             else: # Hold
                 self.shares_traded = 0
         else:
-            if action_value >= 0:
+            if action >= 0:
                 self.invalid_acitons_count += 1
                 
             if self.shares_held > 0:
