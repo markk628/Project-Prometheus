@@ -4,7 +4,7 @@ from collections import deque
 from gymnasium import spaces
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config.config import WINDOW_SIZE, INITIAL_BALANCE, MAX_TRADING_UNITS, SEC_FEE, SEC_FEE_PRINCIPAL, TAF_FEE, TAF_FEE_CAP, CAT_FEE, SPREAD, SLIPPAGE, MINUTES_PER_TRADING_DAY
+from src.config.config import WINDOW_SIZE, INITIAL_BALANCE, MAX_TRADING_UNITS, SEC_FEE, SEC_FEE_PRINCIPAL, TAF_FEE, TAF_FEE_CAP, CAT_FEE, SPREAD, SLIPPAGE
 from src.utils.logger import Logger
 from src.utils.utils import load_stock_data
 
@@ -25,9 +25,16 @@ class Environment:
         logger: Optional[Logger]=None
     ):
         self.data = data.drop(['timestamp', 'close'], axis=1).to_numpy(dtype=np.float32)
+        self.feature_dim = self.data.shape[1]
+        self.data_length = self.data.shape[0]
         self.prices = data['close'].to_numpy()
         self.timestamps = data['timestamp'].to_numpy()
-        self.market_open_idx = data[data['timestamp'].str.contains('14:30:00')].index.to_numpy()
+        self.market_open_idx = (
+            data.index[data['timestamp'].str.contains('09:30:00')]
+            .to_numpy()
+        )
+        self.market_close_idx = np.roll(self.market_open_idx, -1) - 1
+        self.market_close_idx[-1] = len(data) - 1
         self.window_size = window_size
         self.initial_balance = initial_balance
         # TODO make max_trading_units dynamic using market data
@@ -51,11 +58,7 @@ class Environment:
         self.slippage = slippage
         self.logger = logger
         
-        # Data
-        self.feature_dim = self.data.shape[1]
-        self.data_length = self.data.shape[0]
-        
-        # Env state
+        # Env state (Reset these every episode)
         self.current_step = 0
         self.current_step_in_episode = 0
         self.balance = initial_balance
@@ -76,6 +79,9 @@ class Environment:
         # self.return_volatility = 1e-9
         
         self.invalid_actions_count = 0
+        self.episode_start = 0
+        self.episode_end = 0
+        self.episode_length = 0
         
         # Episode history
         self.states_history = []
@@ -101,7 +107,20 @@ class Environment:
         
         if self.logger:
             self.logger.info('Trading environment initialized')
-            
+     
+    def _get_episode_bounds(self, current_step: int) -> Tuple[int, int, int]:
+        """
+        Returns (episode_start, episode_end, episode_length)
+        """
+        # Find which trading day idx
+        day_idx = np.searchsorted(self.market_open_idx, current_step, side="right") - 1
+        
+        episode_start = self.market_open_idx[day_idx]
+        episode_end = self.market_close_idx[day_idx]
+        episode_length = episode_end - episode_start + 1
+        
+        return episode_start, episode_end, episode_length
+       
     def reset(self) -> Dict[str, np.ndarray]:
         # State
         self.current_step_in_episode = 0
@@ -123,6 +142,7 @@ class Environment:
         # self.return_volatility = 1e-9
         
         self.invalid_actions_count = 0
+        self.episode_start, self.episode_end, self.episode_length = self._get_episode_bounds(self.current_step)
         
         # History
         self.states_history = []
@@ -184,6 +204,9 @@ class Environment:
         # Execute action
         self._execute_trade_action(action)
         
+        # Check if episode is over
+        done = self.current_step >= self.episode_end
+        
         # Step
         self.current_step += 1
         self.current_step_in_episode += 1
@@ -203,7 +226,6 @@ class Environment:
         # Record reward
         self.rewards_history.append(reward)
         
-        done = '20:59:00' in self.timestamps[self.current_step - 1]
         observation = self._get_observation()
         info = self._get_info()
         return observation, reward, done, info
@@ -230,7 +252,7 @@ class Environment:
             self.balance / portfolio_value,  # cash ratio
             (self.shares_held * self._get_current_price()) / portfolio_value,  # stock ratio
             self._get_unrealized_pnl_pct(),
-            min(self.hold_time / MINUTES_PER_TRADING_DAY, 1.0)
+            min(self.hold_time / self.episode_length, 1.0)
         ], dtype=np.float32)
         
         observation = {
@@ -312,7 +334,7 @@ class Environment:
         
         previous_shares = self.shares_held
         
-        if not '20:59:00' in self.timestamps[self.current_step]:
+        if not self.current_step >= self.episode_end:
             if action > 0: # Buy
                 max_shares = int(self.balance / current_price)
                 shares_to_buy = min(max_shares, int(self.max_trading_units * action))
