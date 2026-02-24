@@ -166,7 +166,7 @@ def main():
         portfolio_state_len=portfolio_dim,
         logger=logger
     )
-    model_path = f"{MODELS_DIR}/final_sac_model_20260220_103003"
+    model_path = f"{MODELS_DIR}/v2/final_sac_model_20260224_215342"
     agent.load_model(model_path)
     
     backtester = Backtester(
