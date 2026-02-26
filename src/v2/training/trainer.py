@@ -9,9 +9,9 @@ from time import time
 from typing import Dict, List, Optional, Union
 
 from src.config.config import DATA_DIR, BATCH_SIZE, NUM_EPISODES, VALID_INTERVAL, SAVE_MODEL_INTERVAL, MODELS_DIR, RESULTS_DIR, SEED
-from src.v1.environment.environment import Environment
+from src.v2.environment.environment import Environment
 from src.utils.logger import Logger
-from src.v1.model.agent import Agent
+from src.v2.model.agent import Agent
 from src.utils.utils import create_directory, load_stock_data, format_duration
 
 class Trainer:
@@ -64,7 +64,7 @@ class Trainer:
         self.valid_actions = []
         
         if self.logger:
-            self.logger.info(f"Trainer initialized: {num_episodes} episodes, {self.train_env.feature_dim} features, {self.train_env.observation_space['portfolio_state'].shape[0]} portfolio state, {batch_size} samples per batch")
+            self.logger.info(f"Trainer initialized: {num_episodes} episodes, {self.train_env.feature_dim} market states, {self.train_env.observation_space['portfolio_state'].shape[0]} portfolio states, {batch_size} samples per batch")
             
     def train(self) -> Dict[str, List[float]]:
         start_time = time()
@@ -123,7 +123,7 @@ class Trainer:
             avg_hold_time = info['avg_hold_time']
             self.train_avg_hold_times.append(avg_hold_time)
             
-            invalid_actions_count = info['invalid_acitons_count']
+            invalid_actions_count = info['invalid_actions_count']
             self.train_invalid_actions_counts.append(invalid_actions_count)
             
             if self.train_env.current_step_in_episode > 0:
@@ -139,6 +139,7 @@ class Trainer:
                 self.logger.info(f"\nEP: {episode}/{self.num_episodes}\
                                    \nEpisode Start Date: {episode_start_date}\
                                    \nEpisode End Date: {episode_end_date}\
+                                   \nEpisode Length: {self.train_env.episode_length}\
                                    \nSteps: {self.train_env.current_step_in_episode}\
                                    \nReward Total: {train_reward:.2f}\
                                    \nReward Mean: {episode_train_rewards.mean()}\
@@ -163,7 +164,7 @@ class Trainer:
                     self.valid_env.current_step = valid_randomized_start_idx_list.pop()
                 self.validate()
             
-            if episode % self.valid_interval == 0:
+            if episode % 10 == 0:
                 self._plot_training_curves(timestamp, episode)
         
         final_model_path = self.agent.save_model(self.models_dir, "final_", timestamp)
@@ -220,7 +221,7 @@ class Trainer:
             avg_hold_time = info['avg_hold_time']
             self.valid_avg_hold_times.append(avg_hold_time)
             
-            invalid_actions_count = info['invalid_acitons_count']
+            invalid_actions_count = info['invalid_actions_count']
             self.valid_invalid_actions_counts.append(invalid_actions_count)
             
             episode_start_date = self.valid_env.timestamps[self.valid_env.episode_start]
@@ -304,8 +305,8 @@ class Trainer:
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
-    
+        plt.close()    
+        
     def _plot_training_curves(self, timestamp: str, episode: int) -> None:
         result_dir = self.results_dir / f"training_{timestamp}"
         loss_dir = result_dir / "loss"
@@ -413,8 +414,8 @@ class Trainer:
             
             ax.plot(train_data, alpha=0.3, color='blue', label=f'Train {ylabel}')
             if len(train_data) >= self.valid_interval:
-                ma = pd.Series(train_data).rolling(window=self.valid_interval).mean().values
-                ax.plot(ma, color='blue', linewidth=1.5, label=f'Train {self.valid_interval}-ep MA')
+                ma = pd.Series(train_data).rolling(window=10).mean().values
+                ax.plot(ma, color='blue', linewidth=1.5, label=f'Train 10-ep MA')
             if valid_data:
                 x_vals = list(range(self.valid_interval, self.valid_interval * len(valid_data) + 1, self.valid_interval))
                 ax.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
@@ -465,8 +466,8 @@ class Trainer:
                 fontsize=10,
                 verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-            )  
-            
+            )
+                
             plt.title(title)
             plt.xlabel("Episode")
             plt.ylabel(ylabel)
@@ -485,7 +486,7 @@ class Trainer:
                 plt.grid(True, alpha=0.3)
                 plt.savefig(loss_dir / loss["filename"], dpi=300, bbox_inches='tight')
                 plt.close()
-        
+                
         self._plot_price_with_actions(
             prices=self.train_env.prices[self.train_env.current_step - self.train_env.current_step_in_episode: self.train_env.current_step],
             actions=self.train_actions,
@@ -524,9 +525,9 @@ def main():
     torch.manual_seed(SEED)
     
     ticker = 'TSLA'
-    train_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
+    train_data_dir = f'{DATA_DIR}/preprocessed/v2/{ticker}/{ticker}_train.csv'
     train_data = load_stock_data(train_data_dir)
-    valid_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_valid.csv'
+    valid_data_dir = f'{DATA_DIR}/preprocessed/v2/{ticker}/{ticker}_valid.csv'
     valid_data = load_stock_data(valid_data_dir)
     
     train_env = Environment(data=train_data)
@@ -541,8 +542,8 @@ def main():
         portfolio_state_len=portfolio_dim
     )
     
-    models_dir = f"{MODELS_DIR}/v1"
-    results_dir = f"{RESULTS_DIR}/v1"
+    models_dir = f"{MODELS_DIR}/v2"
+    results_dir = f"{RESULTS_DIR}/v2"
     
     trainer = Trainer(
         agent=agent,

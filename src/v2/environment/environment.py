@@ -35,12 +35,6 @@ class Environment:
         )
         self.market_close_idx = np.roll(self.market_open_idx, -1) - 1
         self.market_close_idx[-1] = len(data) - 1
-        self.dates = pd.to_datetime(data['timestamp'], utc=True).dt.date.values
-        self.market_close_idx = (
-            pd.Series(self.dates)
-            .ne(pd.Series(self.dates).shift(-1))
-            .to_numpy()
-        )
         self.window_size = window_size
         self.initial_balance = initial_balance
         # TODO make max_trading_units dynamic using market data
@@ -77,13 +71,14 @@ class Environment:
         self.shares_traded = 0
         self.trade_execution_count = 0
         self.total_dollar_traded = 0
+        self.avg_entry_price = 0
         self.hold_time = 0
         self.hold_times = []
         
         # self.recent_returns = deque(maxlen=self.window_size)
         # self.return_volatility = 1e-9
         
-        self.invalid_acitons_count = 0
+        self.invalid_actions_count = 0
         self.episode_start = 0
         self.episode_end = 0
         self.episode_length = 0
@@ -106,13 +101,13 @@ class Environment:
                 low=0, high=1, shape=(self.window_size, self.feature_dim), dtype=np.float32
             ),
             'portfolio_state': spaces.Box(
-                low=0, high=np.inf, shape=(2,), dtype=np.float32
+                low=0, high=np.inf, shape=(4,), dtype=np.float32
             )
         })
         
         if self.logger:
             self.logger.info('Trading environment initialized')
-       
+     
     def _get_episode_bounds(self, current_step: int) -> Tuple[int, int, int]:
         """
         Returns (episode_start, episode_end, episode_length)
@@ -124,8 +119,8 @@ class Environment:
         episode_end = self.market_close_idx[day_idx]
         episode_length = episode_end - episode_start + 1
         
-        return episode_start, episode_end, episode_length   
-            
+        return episode_start, episode_end, episode_length
+       
     def reset(self) -> Dict[str, np.ndarray]:
         # State
         self.current_step_in_episode = 0
@@ -139,13 +134,14 @@ class Environment:
         self.shares_traded = 0
         self.trade_execution_count = 0
         self.total_dollar_traded = 0
+        self.avg_entry_price = 0
         self.hold_time = 0
         self.hold_times = []
         
         # self.recent_returns = deque(maxlen=self.window_size)
         # self.return_volatility = 1e-9
         
-        self.invalid_acitons_count = 0
+        self.invalid_actions_count = 0
         self.episode_start, self.episode_end, self.episode_length = self._get_episode_bounds(self.current_step)
         
         # History
@@ -254,7 +250,9 @@ class Environment:
         portfolio_value = self._get_portfolio_value()
         portfolio_state = np.array([ #TODO update self.observation_space shape each time a new portfolio state is added
             self.balance / portfolio_value,  # cash ratio
-            (self.shares_held * self._get_current_price()) / portfolio_value  # stock ratio
+            (self.shares_held * self._get_current_price()) / portfolio_value,  # stock ratio
+            self._get_unrealized_pnl_pct(),
+            min(self.hold_time / self.episode_length, 1.0)
         ], dtype=np.float32)
         
         observation = {
@@ -322,6 +320,11 @@ class Environment:
         return execution_price, fees, notional
     
     def _execute_trade_action(self, action: float) -> None:
+        def update_avg_entry_price(old_avg, old_shares, buy_price, buy_shares):
+            total_cost = old_avg * old_shares + buy_price * buy_shares
+            total_shares = old_shares + buy_shares
+            return total_cost / total_shares
+        
         current_price = self._get_current_price()
         
         if current_price <= 0:
@@ -333,31 +336,31 @@ class Environment:
         
         if not self.current_step >= self.episode_end:
             if action > 0: # Buy
-                market_price = self._get_current_price()
-                max_shares = int(self.balance / market_price)
+                max_shares = int(self.balance / current_price)
                 shares_to_buy = min(max_shares, int(self.max_trading_units * action))
                 
                 if shares_to_buy > 0:
                     exec_price, fees, notional = self._calculate_transaction_cost(
                         side="buy",
                         shares=shares_to_buy,
-                        market_price=market_price
+                        market_price=current_price
                     )
                     total_cost = notional + fees
                     
                     if self.balance >= total_cost:
+                        self.avg_entry_price = update_avg_entry_price(self.avg_entry_price, self.shares_held, exec_price, shares_to_buy)
                         self.balance -= total_cost
                         self.shares_held += shares_to_buy
                         self.total_shares_purchased += shares_to_buy
                         self.total_transaction_fee += fees
                         self.current_transaction_fee = fees
                         self.shares_traded = shares_to_buy
-                        self.total_dollar_traded += notional
                         self.trade_execution_count += 1
+                        self.total_dollar_traded += notional
                     else:
-                        self.invalid_acitons_count += 1
+                        self.invalid_actions_count += 1
                 else:
-                    self.invalid_acitons_count += 1
+                    self.invalid_actions_count += 1
 
             elif action < 0: # Sell
                 shares_to_sell = min(
@@ -369,7 +372,7 @@ class Environment:
                     exec_price, fees, notional = self._calculate_transaction_cost(
                         side="sell",
                         shares=shares_to_sell,
-                        market_price=self._get_current_price()
+                        market_price=current_price
                     )
                     
                     net_proceeds = notional - fees
@@ -381,24 +384,26 @@ class Environment:
                     self.total_transaction_fee += fees
                     self.current_transaction_fee = fees
                     self.shares_traded = shares_to_sell
-                    self.total_dollar_traded += notional
                     self.trade_execution_count += 1
+                    self.total_dollar_traded += notional
                 else:
-                    self.invalid_acitons_count += 1
+                    self.invalid_actions_count += 1
+                
+                if self.shares_held == 0:
+                    self.avg_entry_price = 0
 
             else: # Hold
                 self.shares_traded = 0
         else:
             if action >= 0:
-                self.invalid_acitons_count += 1
+                self.invalid_actions_count += 1
                 
             if self.shares_held > 0:
-                market_price = self._get_current_price()
                 shares_to_sell = self.shares_held
                 exec_price, fees, notional = self._calculate_transaction_cost(
                     side="sell",
                     shares=shares_to_sell,
-                    market_price=market_price
+                    market_price=current_price
                 )
                 net_proceeds = notional - fees
                 
@@ -411,6 +416,7 @@ class Environment:
                 self.shares_traded = shares_to_sell
                 self.trade_execution_count += 1
                 self.total_dollar_traded += notional
+                self.avg_entry_price = 0
                 
         if self.shares_held > 0:
             self.hold_time += 1
@@ -423,6 +429,11 @@ class Environment:
     
     def _get_portfolio_value(self) -> float:
         return self.balance + self.shares_held * self._get_current_price()
+    
+    def _get_unrealized_pnl_pct(self) -> float:
+        if self.shares_held > 0:
+            return (self._get_current_price() - self.avg_entry_price) / self.avg_entry_price
+        return 0.0
     
     def _calculate_reward(self, prev_portfolio_value: float, current_portfolio_value: float) -> float:
         # if prev_portfolio_value > 0:
@@ -490,7 +501,7 @@ class Environment:
             'trade_execution_count': self.trade_execution_count,
             'turnover_ratio': self.total_dollar_traded / self.initial_balance,
             'avg_hold_time': np.array(self.hold_times).mean() if self.hold_times else 0,
-            'invalid_acitons_count': self.invalid_acitons_count
+            'invalid_actions_count': self.invalid_actions_count
         }
         
     def render(self) -> None:
@@ -525,7 +536,7 @@ def main():
     from src.config.config import DATA_DIR
     
     ticker = 'TSLA'
-    data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_train.csv'
+    data_dir = f'{DATA_DIR}/preprocessed/v2/{ticker}/{ticker}_train.csv'
     data = load_stock_data(data_dir)
     
     env = Environment(data=data, logger=Logger())

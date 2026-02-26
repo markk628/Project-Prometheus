@@ -4,8 +4,8 @@ import numpy as np
 from typing import Any, Dict, Optional
 
 from src.config.config import DATA_DIR, MODELS_DIR, INITIAL_BALANCE, SEC_FEE, SEC_FEE_PRINCIPAL, TAF_FEE, TAF_FEE_CAP, CAT_FEE, SPREAD, SLIPPAGE, WINDOW_SIZE
-from src.v1.environment.environment import Environment
-from src.v1.model.agent import Agent
+from src.v2.environment.environment import Environment
+from src.v2.model.agent import Agent
 from src.utils.logger import Logger
 from src.utils.utils import create_directory, save_to_csv, load_stock_data
 
@@ -153,7 +153,7 @@ def main():
     logger = Logger()
     
     ticker = 'TSLA'
-    test_data_dir = f'{DATA_DIR}/preprocessed/v1/{ticker}/{ticker}_test.csv'
+    test_data_dir = f'{DATA_DIR}/preprocessed/v2/{ticker}/{ticker}_test.csv'
     test_data = load_stock_data(test_data_dir)
     
     action_dim = 1
@@ -166,7 +166,7 @@ def main():
         portfolio_state_len=portfolio_dim,
         logger=logger
     )
-    model_path = f"{MODELS_DIR}/v1/final_sac_model_20260219_223246"
+    model_path = f"{MODELS_DIR}/v2/final_sac_model_20260224_215342"
     agent.load_model(model_path)
     
     backtester = Backtester(
