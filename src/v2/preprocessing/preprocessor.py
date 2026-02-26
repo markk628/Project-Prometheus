@@ -298,8 +298,14 @@ class DataPreprocessor:
         return df_train, df_valid, df_test
 
     def _normalize_data(self, df_train: pd.DataFrame, df_valid: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        # features_to_scale = ['minutes_since_open', 'minutes_to_close', 'volatility_15m', 'adx_20', 'roc_10', 'cum_return_15', 'volume_ratio_15m', 'price_vwap_distance', 'log_return_1', 'volume_log']
-        features_to_scale = ['transactions', 'volume', 'vwap', 'minutes_since_open', 'minutes_to_close', 'volatility_15m', 'adx_20', 'roc_10', 'cum_return_15', 'volume_ratio_15m', 'price_vwap_distance', 'log_return_1', 'volume_log']
+        features_to_scale = [
+            'transactions', 'volume', 'vwap',
+            'minutes_since_open', 'minutes_to_close',               # _add_temporal_patterns 
+            'log_return_1', 'volatility_15m',                       # _add_volatility_features
+            'adx_20',                                               # _add_trend_features 
+            'roc_10', 'cum_return_15',                              # _add_momentum_features
+            'volume_log', 'volume_ratio_15m', 'price_vwap_distance' # _add_volume_features 
+        ]
         
         if self.logger:
             self.logger.info(f'Normalizing features {features_to_scale}...')

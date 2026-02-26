@@ -104,7 +104,8 @@ class Agent:
         
         with torch.no_grad():
             if validate:
-                _, _, action = self.actor.sample(state_tensor)
+                mean, _ = self.actor.forward(state_tensor)
+                action = torch.tanh(mean)
             else:
                 action, _, _ = self.actor.sample(state_tensor)
         

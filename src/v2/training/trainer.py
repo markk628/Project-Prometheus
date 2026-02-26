@@ -64,7 +64,7 @@ class Trainer:
         self.valid_actions = []
         
         if self.logger:
-            self.logger.info(f"Trainer initialized: {num_episodes} episodes, {self.train_env.feature_dim} features, {self.train_env.observation_space['portfolio_state'].shape[0]} portfolio state, {batch_size} samples per batch")
+            self.logger.info(f"Trainer initialized: {num_episodes} episodes, {self.train_env.feature_dim} market states, {self.train_env.observation_space['portfolio_state'].shape[0]} portfolio states, {batch_size} samples per batch")
             
     def train(self) -> Dict[str, List[float]]:
         start_time = time()
@@ -164,7 +164,7 @@ class Trainer:
                     self.valid_env.current_step = valid_randomized_start_idx_list.pop()
                 self.validate()
             
-            if episode % self.valid_interval == 0:
+            if episode % 10 == 0:
                 self._plot_training_curves(timestamp, episode)
         
         final_model_path = self.agent.save_model(self.models_dir, "final_", timestamp)
@@ -414,8 +414,8 @@ class Trainer:
             
             ax.plot(train_data, alpha=0.3, color='blue', label=f'Train {ylabel}')
             if len(train_data) >= self.valid_interval:
-                ma = pd.Series(train_data).rolling(window=self.valid_interval).mean().values
-                ax.plot(ma, color='blue', linewidth=1.5, label=f'Train {self.valid_interval}-ep MA')
+                ma = pd.Series(train_data).rolling(window=10).mean().values
+                ax.plot(ma, color='blue', linewidth=1.5, label=f'Train 10-ep MA')
             if valid_data:
                 x_vals = list(range(self.valid_interval, self.valid_interval * len(valid_data) + 1, self.valid_interval))
                 ax.plot(x_vals, valid_data, color='orange', marker='o', markersize=4, label='Validation')
