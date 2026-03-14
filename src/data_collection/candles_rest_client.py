@@ -40,6 +40,8 @@ def save_raw_market_data_as_json(tickers: list[str]=TICKERS,
     """
     if logger:
         logger.info('Retrieving data from API...')
+    base_dir = f"{DATA_DIR}/raw/{multiplier}_{timespan}"
+    create_directory(base_dir)
     client = RESTClient(MASSIVE_APIKEY)
     for ticker in tickers:
         if logger:
@@ -64,8 +66,6 @@ def save_raw_market_data_as_json(tickers: list[str]=TICKERS,
                 'volume': aggregate.volume,
                 'vwap': aggregate.vwap
             })
-        base_dir = DATA_DIR / 'raw'
-        create_directory(base_dir)
         file_path = f'{base_dir}/{ticker}.json'
         with open (file_path, 'w') as file:
             json.dump(aggregates, file, indent=4)

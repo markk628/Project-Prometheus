@@ -1,6 +1,8 @@
 import gzip
+import logging
 import pandas as pd
 import psycopg2
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
@@ -18,6 +20,99 @@ from src.config.config import (
     DATABASE_USER, 
     DATABASE_PASSWORD
 )
+
+def _copy_file_worker(args: tuple) -> tuple[str, float, int, Optional[str]]:
+    """
+    Module-level worker for parallel bulk ingest via ProcessPoolExecutor.
+
+    Each worker process creates its own psycopg2 connection (connection pool
+    objects are not picklable and cannot be shared across processes). The worker
+    opens the gzip file, streams it directly into Postgres via COPY FROM STDIN,
+    and returns a result tuple for the parent process to log.
+
+    :param args: (file_path, schema, table, db_config)
+    :returns: (filename, size_mb, row_estimate, error_message_or_None)
+    """
+    file_path, schema, table, db_config = args
+    file_path = Path(file_path)
+    error = None
+    dropped = 0
+
+    try:
+        conn = psycopg2.connect(**db_config)
+        conn.autocommit = False
+
+        with conn.cursor() as cur:
+            # Apply per-worker session optimizations. bulk_ingest_optimizations()
+            # in the parent process holds these on a separate pool connection that
+            # worker processes cannot see, so each worker must set them itself.
+            cur.execute("SET LOCAL synchronous_commit = off;")
+            cur.execute("SET LOCAL work_mem = '256MB';")
+            cur.execute("SET LOCAL maintenance_work_mem = '512MB';")
+
+            # Stage into a temp table first so we can cast volume (float → bigint)
+            # and compute the timestamp column (derived from window_start).
+            # Direct COPY into the hypertable would fail because:
+            #   1. `timestamp` is NOT NULL but not present in the CSV.
+            #   2. `volume` arrives as a float string (e.g. "278.000000").
+            cur.execute("""
+                CREATE TEMP TABLE _stage (
+                    ticker TEXT,
+                    volume DOUBLE PRECISION,
+                    open DOUBLE PRECISION,
+                    close DOUBLE PRECISION,
+                    high DOUBLE PRECISION,
+                    low DOUBLE PRECISION,
+                    window_start BIGINT,
+                    transactions INTEGER
+                ) ON COMMIT DROP;
+            """)
+
+            copy_sql = (
+                "COPY _stage (ticker, volume, open, close, high, low, "
+                "window_start, transactions) "
+                "FROM STDIN WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',')"
+            )
+            with gzip.open(file_path, "rt") as f:
+                cur.copy_expert(copy_sql, f)
+
+            cur.execute(
+                "SELECT COUNT(*) FROM _stage WHERE ticker IS NULL OR window_start IS NULL"
+            )
+            dropped = cur.fetchone()[0]
+
+            target = SQL("{}").format(Identifier(schema, table)).as_string(conn)
+            cur.execute(f"""
+                INSERT INTO {target}
+                    (ticker, volume, open, close, high, low,
+                     window_start, transactions, timestamp)
+                SELECT
+                    ticker,
+                    CAST(volume AS BIGINT),
+                    open, close, high, low,
+                    window_start,
+                    transactions,
+                    to_timestamp(window_start / 1e9)
+                FROM _stage
+                WHERE ticker IS NOT NULL
+                  AND window_start IS NOT NULL
+                ON CONFLICT DO NOTHING;
+            """)
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        error = str(e)
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+
+    size_mb = file_path.stat().st_size / 1e6
+    return (file_path.name, size_mb, dropped, error)
+
 
 class DatabaseManager:
     def __init__(
@@ -176,6 +271,29 @@ class DatabaseManager:
             else:
                 return pd.DataFrame(records, columns=column_names)
         
+    def execute_autocommit(self, query: Union[str, Composable]) -> None:
+        """
+        Execute a single DDL statement with autocommit=True (outside any
+        transaction block). Required for statements that Postgres/TimescaleDB
+        refuses to run inside a transaction, e.g. CREATE MATERIALIZED VIEW
+        with TimescaleDB continuous aggregates.
+        """
+        with self._connect() as connection:
+            old_autocommit = connection.autocommit
+            try:
+                connection.autocommit = True
+                with connection.cursor() as cursor:
+                    if isinstance(query, Composable):
+                        cursor.execute(query)
+                    else:
+                        cursor.execute(query)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f'Database error ({type(e).__name__}): {e}')
+                raise
+            finally:
+                connection.autocommit = old_autocommit
+
     @db_exception_handler
     def execute_many(self, cursor, connection, query: Union[str, Composable], params=None) -> None:
         """
@@ -326,33 +444,89 @@ class DatabaseManager:
         if self.logger:
             self.logger.info(f"{table_name} table created successfully.")
     
-    def insert_market_data(self, schema: str, table: str, data_dir: Path) -> None:
+    def insert_market_data(self, schema: str, table: str, data_dir: Path, workers: int = 4) -> None:
         """
-        Insert compressed CSV data into a TimescaleDB table.
-        """
+        Insert compressed CSV data into a TimescaleDB hypertable in parallel.
 
+        Collects all .csv.gz files across the year/month/day directory tree,
+        then distributes them across `workers` processes. Each process owns its
+        own Postgres connection and streams data via COPY FROM STDIN, bypassing
+        the connection pool (which is not picklable).
+
+        Failed files are collected and reported at the end rather than aborting
+        the entire run — useful when ingesting 20+ years where one corrupt file
+        shouldn't kill the job.
+
+        :param schema: Target schema name
+        :param table: Target table name
+        :param data_dir: Root directory with structure year/month/*.csv.gz
+        :param workers: Number of parallel worker processes (default: 4).
+                        Recommended range for a 40MB/s external drive: 3–6.
+                        Beyond 6, drive seek contention outweighs gains.
+        """
         table_name = f"{schema}.{table}"
 
+        all_files = [
+            file
+            for year in sorted(data_dir.iterdir()) if year.is_dir()
+            for month in sorted(year.iterdir()) if month.is_dir()
+            for file in sorted(month.glob("*.csv.gz"))
+        ]
+
+        total = len(all_files)
+
         if self.logger:
-            self.logger.info(f"Inserting data into {table_name}...")
+            self.logger.info(
+                f"Inserting {total:,} files into {table_name} "
+                f"using {workers} parallel workers..."
+            )
 
-        for year in sorted(data_dir.iterdir()):
-            if not year.is_dir():
-                continue
+        worker_args = [
+            (str(f), schema, table, self.config)
+            for f in all_files
+        ]
 
-            for month in sorted(year.iterdir()):
-                if not month.is_dir():
-                    continue
+        completed = 0
+        failed_files = []
+        total_mb = 0.0
 
-                for file in sorted(month.glob("*.csv.gz")):
-                    self.copy_from_gzip_csv(str(file), schema, table)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_copy_file_worker, arg): arg[0]
+                for arg in worker_args
+            }
 
+            for future in as_completed(futures):
+                completed += 1
+                filename, size_mb, dropped, error = future.result()
+                total_mb += size_mb
+
+                if error:
+                    failed_files.append((filename, error))
                     if self.logger:
-                        size_mb = file.stat().st_size / 1e6
-                        self.logger.info(f"Loaded {file.name} ({size_mb:.1f} MB)")
+                        self.logger.error(f"[{completed}/{total}] FAILED {filename}: {error}")
+                else:
+                    if self.logger:
+                        if dropped:
+                            self.logger.warning(
+                                f"{filename}: dropped {dropped} row(s) with null ticker/window_start"
+                            )
+                        self.logger.info(
+                            f"[{completed}/{total}] Loaded {filename} "
+                            f"({size_mb:.1f} MB)"
+                        )
 
         if self.logger:
-            self.logger.info(f"{table_name} insert completed successfully.")
+            self.logger.info(
+                f"{table_name} insert complete. "
+                f"{completed - len(failed_files):,}/{total:,} files loaded "
+                f"({total_mb:.1f} MB on disk total)."
+            )
+            if failed_files:
+                self.logger.warning(
+                    f"{len(failed_files)} file(s) failed — rerun insert_market_data "
+                    f"targeting only failed paths, or inspect logs above."
+                )
             
     def enable_compression(self, schema: str, table: str) -> None:
         """
@@ -396,27 +570,21 @@ class DatabaseManager:
         if self.logger:
             self.logger.info("Compression policy added successfully.")
             
-    def analyze_table(self, schema: str, table: str) -> None:
-        identifier = Identifier(schema, table)
-        sql = SQL("ANALYZE {};").format(identifier)
-        
-        table_name = f"{schema}.{table}"
-
-        if self.logger:
-            self.logger.info(f"Analyzing {table_name}...")
-
-        self.execute(sql)
-
-        if self.logger:
-            self.logger.info(f"{table_name} analyzed successfully.")
-            
     @contextmanager
     def bulk_ingest_optimizations(self):
         """
         Context manager that applies session-level PostgreSQL optimizations for
         bulk ingestion, then restores defaults on exit.
 
-        This sets:
+        TimescaleDB hypertables do not support ALTER TABLE SET UNLOGGED, so
+        WAL cannot be disabled at the table level.
+
+        Note: in the parallel version, worker processes run in separate OS
+        processes and cannot share this pool connection, so they apply the same
+        session settings independently on their own connections. This context
+        manager still applies them for any single-connection work that runs
+        inside the block (e.g. post-ingest index operations).
+
           - synchronous_commit = off  : flushes WAL asynchronously (~200ms lag),
                                         giving the same throughput benefit without
                                         risking data loss beyond a crash window.
@@ -446,22 +614,22 @@ class DatabaseManager:
                 if self.logger:
                     self.logger.info('Bulk ingest session optimizations reset.')
             
-    # def create_time_index(self, schema: str, table: str) -> None:
-    #     index_sql = SQL("""
-    #         CREATE INDEX IF NOT EXISTS {} 
-    #         ON {} (ticker, timestamp DESC);
-    #     """).format(
-    #         Identifier(f"{table}_timestamp_idx"),
-    #         Identifier(schema, table)
-    #     )
+    def create_time_index(self, schema: str, table: str) -> None:
+        index_sql = SQL("""
+            CREATE INDEX IF NOT EXISTS {} 
+            ON {} (ticker, timestamp DESC);
+        """).format(
+            Identifier(f"{table}_timestamp_idx"),
+            Identifier(schema, table)
+        )
 
-    #     if self.logger:
-    #         self.logger.info(f"Creating timestamp index on {schema}.{table}...")
+        if self.logger:
+            self.logger.info(f"Creating timestamp index on {schema}.{table}...")
 
-    #     self.execute(index_sql)
+        self.execute(index_sql)
         
-    #     if self.logger:
-    #         self.logger.info('Timestamp index created successfully.')
+        if self.logger:
+            self.logger.info('Timestamp index created successfully.')
             
     def create_continuous_aggregates(self, schema: str, source_table: str) -> None:
         """
@@ -470,9 +638,9 @@ class DatabaseManager:
         """
 
         aggregates = {
-            # "5m": "5 minutes",
-            # "15m": "15 minutes",
-            # "30m": "30 minutes",
+            "5m": "5 minutes",
+            "15m": "15 minutes",
+            "30m": "30 minutes",
             "1h": "1 hour",
             "1d": "1 day"
         }
@@ -506,7 +674,9 @@ class DatabaseManager:
             if self.logger:
                 self.logger.info(f"Creating continuous aggregate {full_view_name}...")
 
-            self.execute(query, autocommit=True)
+            # CREATE MATERIALIZED VIEW (TimescaleDB continuous aggregate) cannot
+            # run inside a transaction block — use autocommit mode.
+            self.execute_autocommit(query)
 
             if self.logger:
                 self.logger.info(f"{full_view_name} created successfully.")
@@ -606,27 +776,28 @@ class DatabaseManager:
             table=self.MARKET_DATA_BARS_1MIN,
             chunk_interval="1 day"
         )
-        # self.create_time_index(
-        #     schema=self.MARKET_DATA_RAW_SCHEMA,
-        #     table=self.MARKET_DATA_BARS_1MIN
-        # )
+        self.create_time_index(
+            schema=self.MARKET_DATA_RAW_SCHEMA,
+            table=self.MARKET_DATA_BARS_1MIN
+        )
         
-    def insert_data(self) -> None:
-        # with self.bulk_ingest_optimizations():
-        #     self.insert_market_data(
-        #         schema=self.MARKET_DATA_RAW_SCHEMA,
-        #         table=self.MARKET_DATA_BARS_1MIN,
-        #         data_dir=Path(f'{DATA_DIR}/raw/minute_data')
-        #     )
-        # self.enable_compression(
-        #     schema=self.MARKET_DATA_RAW_SCHEMA,
-        #     table=self.MARKET_DATA_BARS_1MIN
-        # )
-        # self.apply_compression_policy(
-        #     schema=self.MARKET_DATA_RAW_SCHEMA,
-        #     table=self.MARKET_DATA_BARS_1MIN,
-        #     interval='30 days'
-        # )
+    def insert_data(self, workers: int = 4) -> None:
+        with self.bulk_ingest_optimizations():
+            self.insert_market_data(
+                schema=self.MARKET_DATA_RAW_SCHEMA,
+                table=self.MARKET_DATA_BARS_1MIN,
+                data_dir=Path(f'{DATA_DIR}/raw/minute_data'),
+                workers=workers
+            )
+        self.enable_compression(
+            schema=self.MARKET_DATA_RAW_SCHEMA,
+            table=self.MARKET_DATA_BARS_1MIN
+        )
+        self.apply_compression_policy(
+            schema=self.MARKET_DATA_RAW_SCHEMA,
+            table=self.MARKET_DATA_BARS_1MIN,
+            interval='30 days'
+        )
         self.create_continuous_aggregates(
             schema=self.MARKET_DATA_RAW_SCHEMA,
             source_table=self.MARKET_DATA_BARS_1MIN
@@ -651,8 +822,8 @@ class DatabaseManager:
 def main():
     database_manager = DatabaseManager(logger=Logger())
     try:
-        # database_manager.set_up_database()
-        database_manager.insert_data()
+        database_manager.set_up_database()
+        database_manager.insert_data(workers=4)
     finally:
         database_manager.close()
     

@@ -10,6 +10,7 @@ from pathlib import Path
 
 # Keys
 load_dotenv()
+MASSIVE_AWSKEY = os.getenv('MASSIVE_AWSKEY')
 MASSIVE_APIKEY = os.getenv('MASSIVE_APIKEY')
 DATABASE_HOST = os.getenv('DATABASE_HOST')
 DATABASE_PORT = os.getenv('DATABASE_PORT')
@@ -27,16 +28,78 @@ MODELS_DIR = ROOT_DIR / "models"                                                
 RESULTS_DIR = ROOT_DIR / "results"                                                 # Results dir
 
 # Stock tickers config
-# TICKERS = ['AAPL', 'MSFT', 'NVDA', 'TSLA']
+TICKERS = [
+
+    # ===== Core Market Structure =====
+    "SPY", "VOO", "IVV", "VTI", "QQQ",
+    "IWM",          # Small caps
+    "MDY",          # Mid caps
+
+    # ===== Sector ETFs =====
+    "XLK", "XLF", "XLE", "XLV", "XLI",
+    "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+
+    # ===== International =====
+    "EFA",          # Developed ex-US
+    "EEM",          # Emerging markets
+    "FXI",          # China
+    "EWJ",          # Japan
+
+    # ===== Rates & Bonds =====
+    "TLT",          # Long duration
+    "IEF",          # 7-10 year
+    "SHY",          # Short duration
+    "LQD",          # Investment grade credit
+    "HYG",          # High yield credit
+
+    # ===== Volatility =====
+    "VIXY",         # VIX ETF proxy
+    "UVXY",         # Leveraged vol (stress regime signal)
+
+    # ===== Dollar =====
+    "UUP",          # Dollar index ETF
+
+    # ===== Commodities =====
+    "GLD",          # Gold
+    "SLV",          # Silver
+    "USO",          # Oil
+    "DBA",          # Agriculture
+
+    # ===== Defense / Industrial =====
+    "ITA",
+
+    # ===== Real Assets =====
+    "VNQ",          # REIT ETF
+    "AMT", "PLD",
+
+    # ===== Financial Sensitivity =====
+    "JPM", "BAC", "GS", "KKR", "BRK.B",
+
+    # ===== Energy / Materials Leaders =====
+    "XOM", "CVX", "COP", "FCX", "NEM",
+    
+    # ===== Semiconductor Supply Chain =====
+    "TSM", "ASML", "AMAT", "LRCX", "KLAC", "AMKR", "ASX", "SOXX", "SMH",
+
+    # ===== Mega Cap Tech =====
+    "AAPL", "MSFT", "NVDA", "AMZN",
+    "GOOGL", ["FB", "META"], "TSLA", "AMD",
+
+    # ===== Defensive Staples / Healthcare =====
+    "PG", "KO", "WMT", "JNJ", "UNH",
+
+    # ===== Emerging Tech / High Beta =====
+    "ARKK", "MRNA", "SHOP", "NET", "ROKU", "TWLO"
+]
 TICKERS = ['TSLA']
 
 # Data config
-DATA_TIMESPAN = "minute"          # Data timespan
-DATA_START_DATE = '1430899200000' # 2015-05-06 4:00 AM UTC
-DATA_END_DATE = '1746573780000'   # 2025-05-06 11:23 PM UTC
+DATA_TIMESPAN = "minute"
+DATA_START_DATE = '2000-01-01'
+DATA_END_DATE = '2026-03-04'
 
 # Preprocessing config
-CUTOFF_TIMESTAMP = '2021-05-06 08:00:00' 
+CUTOFF_TIMESTAMP = '2019-12-31 15:59:00-4:00' 
 
 # Trading env config
 WINDOW_SIZE = 60
