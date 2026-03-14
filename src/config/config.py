@@ -50,6 +50,7 @@ TAF_FEE_CAP = 8.30          # and capped at $8.30
 CAT_FEE = 0.0000265         # charged per trade
 SPREAD = 0.02               # currently for minute data 0.05 or 0.10 for daily data
 SLIPPAGE = 0.0005           # currently for minute data 0.001 for daily data
+MULTIDAY_MINUTE_EPISODE_DAYS = 5
 
 # Model hyperparameters config
 HIDDEN_DIM = 256            # Hidden dim size
@@ -57,14 +58,16 @@ LEARNING_RATE_ACTOR = 3e-4  # Actor NN learning rate
 LEARNING_RATE_CRITIC = 3e-4 # Crtic NN learning rate
 LEARNING_RATE_ALPHA = 3e-4  # Optimizer learning rate
 ALPHA_INIT = 0.2            # Entropy temperature (controls how random the policy is)
-GAMMA = 0.99                # Discount factor (higher = cares more about long term rewards)
+GAMMA = 0.99                # Discount factor increase for longer episodes (higher = cares more about long term rewards)
+GAMMA_MULTIDAY_MINUTE = 0.995 # 0.999
 TAU = 0.005                 # Controls how soft the target network is updated
-REPLAY_BUFFER_SIZE = 300000 # Replay buffer's max size (increase/decrease based on ram size)
+REPLAY_BUFFER_SIZE = 1000000 # Replay buffer's max size (increase/decrease based on ram size)
 TARGET_UPDATE_INTERVAL = 1
 SEED = 42
 
 # Training config
 BATCH_SIZE = 256
+BATCH_SIZE_MULTIDAY_MINUTE = 256 # 512
 NUM_EPISODES = 1000
 VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
