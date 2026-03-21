@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import polars as pl
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -18,35 +19,49 @@ def create_directory(directory_path: Union[str, Path], logger: Logger=None) -> N
         if logger:
             logger.info(f"Directory created: {directory_path}")
         
-def save_to_csv(df: pd.DataFrame, file_path: Union[str, Path], index: bool = True, logger: Logger=None) -> None:
+def save_to_csv(df: Union[pd.DataFrame, pl.DataFrame], file_path: Union[str, Path], index: bool = True, logger: Logger=None) -> None:
     """
     Saves a DataFrame to a CSV file
     
     :param df: DataFrame to save
-    :type df: pd.DataFrame
+    :type df: DataFrame
     :param file_path: Path where the file will be saved
     :type file_path: Union[str, Path]
     :param index: Whether to include the index
     :type index: bool
     """
     create_directory(os.path.dirname(file_path))
-    df.to_csv(file_path, index=index, encoding='utf-8-sig')
+    if isinstance(df, pd.DataFrame):
+        df.to_csv(file_path, index=index, encoding='utf-8-sig')
+    elif isinstance(df, pl.DataFrame):
+        df.write_csv(file_path, include_bom=True)
+    else:
+        if logger:
+            logger.error(f"Did not implement a way to handle saving object of type {type(df)} as csv.")
     if logger:
         logger.info(f"File saved: {file_path}")
-
-def load_from_csv(file_path: Union[str, Path]) -> pd.DataFrame:
+        
+def save_to_parquet(df: Union[pd.DataFrame, pl.DataFrame], file_path: Union[str, Path], index: bool = True, logger: Logger=None) -> None:
     """
-    Loads a DataFrame from a CSV file
+    Saves a DataFrame to a CSV file
     
-    :param file_path: Path of the csv file to load
+    :param df: DataFrame to save
+    :type df: DataFrame
+    :param file_path: Path where the file will be saved
     :type file_path: Union[str, Path]
-    :return: Loaded DataFrame
-    :rtype: DataFrame
+    :param index: Whether to include the index
+    :type index: bool
     """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-    
-    return pd.read_csv(file_path, encoding='utf-8-sig')
+    create_directory(os.path.dirname(file_path))
+    if isinstance(df, pd.DataFrame):
+        df.to_parquet(file_path, index=index)
+    elif isinstance(df, pl.DataFrame):
+        df.write_parquet(file_path)
+    else:
+        if logger:
+            logger.error(f"Did not implement a way to handle saving object of type {type(df)} as parquet.")
+    if logger:
+        logger.info(f"File saved: {file_path}")
 
 def format_duration(seconds: float):
     """

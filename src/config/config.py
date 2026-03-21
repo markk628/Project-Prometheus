@@ -1,7 +1,6 @@
 import os
-import logging
 import torch
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -83,7 +82,7 @@ TICKERS = [
 
     # ===== Mega Cap Tech =====
     "AAPL", "MSFT", "NVDA", "AMZN",
-    "GOOGL", ["FB", "META"], "TSLA", "AMD",
+    "GOOGL", "FB", "META", "TSLA", "AMD",
 
     # ===== Defensive Staples / Healthcare =====
     "PG", "KO", "WMT", "JNJ", "UNH",
@@ -91,7 +90,17 @@ TICKERS = [
     # ===== Emerging Tech / High Beta =====
     "ARKK", "MRNA", "SHOP", "NET", "ROKU", "TWLO"
 ]
-TICKERS = ['TSLA']
+TICKER_ALIASES = [
+    {
+        "current_ticker": "META",
+        "previous_tickers": [
+            {
+                "symbol": "FB",
+                "change_date": datetime(2022, 6, 9, tzinfo=timezone.utc)
+            }
+        ]
+    }
+]
 
 # Data config
 DATA_TIMESPAN = "minute"
@@ -99,7 +108,7 @@ DATA_START_DATE = '2000-01-01'
 DATA_END_DATE = '2026-03-04'
 
 # Preprocessing config
-CUTOFF_TIMESTAMP = '2019-12-31 15:59:00-4:00' 
+CUTOFF_TIMESTAMP = '2019-12-30 00:00:00+00:00'
 
 # Trading env config
 WINDOW_SIZE = 60
