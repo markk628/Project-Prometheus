@@ -78,11 +78,22 @@ TICKERS = [
     "XOM", "CVX", "COP", "FCX", "NEM",
     
     # ===== Semiconductor Supply Chain =====
-    "TSM", "ASML", "AMAT", "LRCX", "KLAC", "AMKR", "ASX", "SOXX", "SMH",
+    "TSM",          # Foundry
+    "ASML",         # Lithography
+    "AMAT",         # Equipment
+    "LRCX",         # Equipment
+    "KLAC",         # Inspection
+    "AMKR",         # Packaging
+    "ASX",          # Materials
+    "MU",           # Memory
+    "SOXX", "SMH",  # Sector ETFs
 
     # ===== Mega Cap Tech =====
     "AAPL", "MSFT", "NVDA", "AMZN",
     "GOOGL", "FB", "META", "TSLA", "AMD",
+    
+    # ===== Enterprise / Legacy Tech =====
+    "IBM", "ORCL", "CSCO", "ACN",
 
     # ===== Defensive Staples / Healthcare =====
     "PG", "KO", "WMT", "JNJ", "UNH",

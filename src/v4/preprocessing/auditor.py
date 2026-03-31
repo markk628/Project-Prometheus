@@ -10,8 +10,11 @@ from src.utils.utils import save_to_parquet
 
 
 class DataAuditor:
-    def __init__(self, logger: Logger):
+    def __init__(self, logger: Logger, train_path: str=None, valid_path: str=None, test_path: str=None):
         self.data_dir = f"{DATA_DIR}/preprocessed/v4/"
+        self.train_path = f"{self.data_dir}/unified/unified_train.parquet" if train_path is None else train_path
+        self.valid_path = f"{self.data_dir}/unified/unified_valid.parquet" if valid_path is None else valid_path
+        self.test_path = f"{self.data_dir}/unified/unified_test.parquet" if test_path is None else test_path
         self.logger = logger
 
     # =========================
@@ -29,9 +32,12 @@ class DataAuditor:
     # =========================
     def _fetch_unified_data(self) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         self.logger.info("Fetching data...")
-        train = pl.read_parquet(f"{self.data_dir}/unified_train.parquet")
-        valid = pl.read_parquet(f"{self.data_dir}/unified_valid.parquet")
-        test  = pl.read_parquet(f"{self.data_dir}/unified_test.parquet")
+        self.logger.info(f"Train: {self.train_path}")
+        self.logger.info(f"Valid: {self.valid_path}")
+        self.logger.info(f"Test: {self.test_path}")
+        train = pl.read_parquet(self.train_path)
+        valid = pl.read_parquet(self.valid_path)
+        test  = pl.read_parquet(self.test_path)
         self.logger.info("Data fetched.")
         return train, valid, test
 
@@ -328,9 +334,9 @@ class DataAuditor:
                 after_valid = valid.estimated_size("gb")
                 after_test  = test.estimated_size("gb")
                 
-                save_to_parquet(train, f"{self.data_dir}/unified_train.parquet")
-                save_to_parquet(valid, f"{self.data_dir}/unified_valid.parquet")
-                save_to_parquet(test, f"{self.data_dir}/unified_test.parquet")
+                save_to_parquet(train, self.train_path)
+                save_to_parquet(valid, self.valid_path)
+                save_to_parquet(test, self.test_path)
                 
                 self.logger.info("Float downcasting complete.")
                 self.logger.info(f"Train memory: {before_train:.2f}GB → {after_train:.2f}GB")
@@ -346,7 +352,7 @@ class DataAuditor:
     # Run
     # =========================
     def audit(self):
-        self.logger.info("Starting Audit...")
+        self.logger.info("Starting audit...")
 
         train, valid, test = self._fetch_unified_data()
 
@@ -366,10 +372,15 @@ class DataAuditor:
 
         self._check_for_multicollinearity()
 
-        self.logger.info("QA complete.")
+        self.logger.info("Audit complete.")
         
 def main():
-    auditor = DataAuditor(Logger())
+    data_dir = f"{DATA_DIR}/preprocessed/v4/"
+    train_latent = f"{data_dir}/unified_latent/unified_latent_train_v2.parquet"
+    valid_latent = f"{data_dir}/unified_latent/unified_latent_valid_v2.parquet"
+    test_latent = f"{data_dir}/unified_latent/unified_latent_test_v2.parquet"
+    auditor = DataAuditor(Logger(), train_latent, valid_latent, test_latent)
+    # auditor = DataAuditor(Logger())
     auditor.audit()
     
 if __name__ == '__main__':
