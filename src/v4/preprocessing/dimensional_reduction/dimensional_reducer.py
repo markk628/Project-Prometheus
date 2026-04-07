@@ -14,6 +14,20 @@ from src.config.config import ROOT_DIR, DATA_DIR, DEVICE
 from src.utils.logger import Logger
 from src.utils.utils import save_to_parquet, create_directory
 
+# TODO don't compress regime features (cross sectional features)
+"""
+TODO
+Target-Aware Compression: Instead of a vanilla autoencoder that just rebuilds the input, 
+add an auxiliary loss. Force the bottleneck layer to not only reconstruct the state but 
+also predict a future systemic metric (e.g., predict the next 60 minutes of market breadth). 
+This forces the latent space to organize itself around regime-critical information rather 
+than just variance.
+
+Variational Autoencoders (VAE): If you aren't already, use a VAE instead of a standard AE. 
+A VAE forces the latent space to be continuous and smooth, which aligns perfectly with the 
+continuous, overlapping nature of market regimes.
+"""
+
 
 # def nearest_power_of_2(x, min_val=16, max_val=1024):
 #     power = 2 ** round(math.log2(x))

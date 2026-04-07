@@ -91,7 +91,7 @@ def format_duration(seconds: float):
 
     return ' '.join(parts)
 
-def load_stock_data(data_path: str, start_timestamp: Optional[str]=None, end_timestamp: Optional[str]=None) -> pd.DataFrame:
+def load_stock_data(data_path: str, start_timestamp: Optional[Union[str, datetime]]=None, end_timestamp: Optional[Union[str, datetime]]=None) -> Union[pl.DataFrame, pd.DataFrame]:
     """
     Get saved csv data and filter to regular market hours
     
@@ -103,14 +103,29 @@ def load_stock_data(data_path: str, start_timestamp: Optional[str]=None, end_tim
     :rtype: Tuple[pd.DataFrame, datetime, datetime]
     """
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"File not found: {data_path}")
+        raise FileNotFoundError(f"Where's the file, Lebowski: {data_path}")
     
-    df = pd.read_csv(data_path)
+    if data_path.endswith(".csv"):
+        df = pd.read_csv(data_path)
+    elif data_path.endswith(".parquet"):
+        df = pl.read_parquet(data_path)
+        df = df.with_columns(
+            pl.col('timestamp').cast(pl.Datetime('us', 'UTC'))
+        )
 
     if start_timestamp:
-        df = df[df['timestamp'] >= start_timestamp]
+        if isinstance(start_timestamp, str):
+            df = df[df['timestamp'] >= start_timestamp]
+        else:
+            df = df.filter(
+                pl.col('timestamp') >= start_timestamp
+            )
     
     if end_timestamp:
-        df = df[df['timestamp'] < end_timestamp]
-        
-    return df
+        if isinstance(end_timestamp, str):
+            df = df[df['timestamp'] < end_timestamp]
+        else:
+            df = df.filter(
+                pl.col('timestamp') <= end_timestamp
+            )
+    return df.sort('timestamp')

@@ -375,7 +375,7 @@ class DataAuditor:
         self.logger.info("Audit complete.")
         
 def main():
-    data_dir = f"{DATA_DIR}/preprocessed/v4/"
+    data_dir = f"{DATA_DIR}/preprocessed/v4"
     train_latent = f"{data_dir}/unified_latent/unified_latent_train_v2.parquet"
     valid_latent = f"{data_dir}/unified_latent/unified_latent_valid_v2.parquet"
     test_latent = f"{data_dir}/unified_latent/unified_latent_test_v2.parquet"

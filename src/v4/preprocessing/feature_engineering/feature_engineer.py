@@ -12,6 +12,11 @@ from src.utils.logger import Logger
 from src.utils.utils import create_directory, save_to_parquet
 
 
+# TODO add ipo info when doing daily data
+# TODO walk forward validation
+# train 5 days, valid the very next day, etc
+# TODO play around with look back windows (especially normalization)
+
 # ---------------------------------------------------------------------------
 # Module-level helpers (must be top-level so ProcessPoolExecutor can pickle them)
 # ---------------------------------------------------------------------------
