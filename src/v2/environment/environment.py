@@ -37,17 +37,6 @@ class Environment:
         self.market_close_idx[-1] = len(data) - 1
         self.window_size = window_size
         self.initial_balance = initial_balance
-        # TODO make max_trading_units dynamic using market data
-        # something like this
-        '''
-        vol_factor = rolling_vol / target_vol
-        volume_factor = current_volume / avg_volume
-
-        effective_max_units = base_units * clamp(
-            vol_factor * volume_factor,
-            0.5, 3.0
-        )
-        '''
         self.max_trading_units = max_trading_units
         self.sec_fee = sec_fee
         self.sec_fee_principal = sec_fee_principal
@@ -124,7 +113,7 @@ class Environment:
     def reset(self) -> Dict[str, np.ndarray]:
         # State
         self.current_step_in_episode = 0
-        self.balance = self.initial_balance # TODO eventually we want the previous episode's balance to carry over so remove this when model is consistently winning
+        self.balance = self.initial_balance
         self.shares_held = 0
         self.total_shares_purchased = 0
         self.total_shares_sold = 0
@@ -248,7 +237,7 @@ class Environment:
         
         # Calculate portfolio state
         portfolio_value = self._get_portfolio_value()
-        portfolio_state = np.array([ #TODO update self.observation_space shape each time a new portfolio state is added
+        portfolio_state = np.array([
             self.balance / portfolio_value,  # cash ratio
             (self.shares_held * self._get_current_price()) / portfolio_value,  # stock ratio
             self._get_unrealized_pnl_pct(),

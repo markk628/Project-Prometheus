@@ -82,7 +82,7 @@ class Agent:
         for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
             target_param.data.copy_(param.data)
             
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr) # TODO add weight decay if overfitting suspected
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr)
         
         if self.use_automatic_entropy_tuning:

@@ -122,12 +122,6 @@ class Backtester:
             if volatility > 0 else 0.0
         )
 
-        # Max drawdown (on compounded equity)
-         # TODO add when previous episode's balance carries over for now use the one below
-        # equity_curve = (1 + daily_returns).cumprod()
-        # rolling_max = equity_curve.cummax()
-        # drawdown = (equity_curve - rolling_max) / rolling_max
-        # max_drawdown = drawdown.min()
         max_drawdown = daily_returns.min()
 
         # Win rate

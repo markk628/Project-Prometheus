@@ -353,7 +353,7 @@ class DataPreprocessor:
         df = self._add_volume_features(df)
         
         df['log_return_1'] = np.log(df['close'] / df['close'].shift(1))
-        df['volume_log'] = np.log1p(df['volume']) # TODO volume_log_norm = (volume_log - volume_log.mean()) / volume_log.std() instead of scaling use this instead MAKE SURE THERE IS NO DATA LEAK
+        df['volume_log'] = np.log1p(df['volume'])
         
         df = self._drop_unnecessary_features(df)
         df = self._drop_rows_before_timestamp(df, timestamp)
