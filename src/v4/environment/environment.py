@@ -1,5 +1,6 @@
-import polars as pl
 import numpy as np
+import math
+import polars as pl
 from collections import deque
 from gymnasium import spaces
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,7 +10,6 @@ from src.config.config import (
     INITIAL_BALANCE, 
     MAX_TRADING_UNITS, 
     SEC_FEE, 
-    SEC_FEE_PRINCIPAL, 
     TAF_FEE, 
     TAF_FEE_CAP, 
     CAT_FEE, 
@@ -28,7 +28,6 @@ class Environment:
         initial_balance: float=INITIAL_BALANCE,
         max_trading_units: int=MAX_TRADING_UNITS,
         sec_fee: float=SEC_FEE,
-        sec_fee_principal: float=SEC_FEE_PRINCIPAL,
         taf_fee: float=TAF_FEE,
         taf_fee_cap: float=TAF_FEE_CAP,
         cat_fee: float=CAT_FEE,
@@ -36,20 +35,23 @@ class Environment:
         slippage: float=SLIPPAGE,
         logger: Optional[Logger]=None
     ):
-        self.PORTFOLIO_STATE_DIM = 8
+        self.PORTFOLIO_STATE_DIM = 7
         temporal_col_names = [
             'minute_sin', 'minute_cos', 'hour_sin', 'hour_cos',
             'day_sin', 'day_cos', 'minutes_since_open', 'minutes_to_close'
         ]
-        feature_cols = [c for c in data.columns if c not in ('index', 'timestamp', 'close')]
-        # Reorder: market features first, temporal features last
-        market_cols = [c for c in feature_cols if c not in temporal_col_names]
-        feature_cols = market_cols + temporal_col_names
-        self.data = data.select(feature_cols).to_numpy()
+        exclude = {'index', 'timestamp', 'close'} | set(temporal_col_names)
+        feature_cols = [c for c in data.columns if c not in exclude]
+        # Market = AE latents, Regime = cross-sectional / regime features
+        market_cols = [c for c in feature_cols if c.startswith('latent_') or c.startswith('pca_')]
+        regime_col_names = [c for c in feature_cols if c not in market_cols]
+        # Reorder: market first, then temporal, then regime
+        ordered_cols = market_cols + list(temporal_col_names) + regime_col_names
+        self.data = data.select(ordered_cols).to_numpy()
         self.n_market = len(market_cols)
         self.n_temporal = len(temporal_col_names)
+        self.n_regime = len(regime_col_names)
         self.feature_dim = self.n_market  # only market features for network input_shape
-        self.data_length = self.data.shape[0]
         self.prices = data.select('close').to_numpy().ravel()
         self.timestamps = data.select('timestamp').to_numpy().ravel()
         ts_dates = data.select(pl.col("timestamp").dt.date()).to_numpy().ravel()
@@ -76,7 +78,6 @@ class Environment:
         '''
         self.max_trading_units = max_trading_units
         self.sec_fee = sec_fee
-        self.sec_fee_principal = sec_fee_principal
         self.taf_fee = taf_fee
         self.taf_fee_cap = taf_fee_cap
         self.cat_fee = cat_fee
@@ -187,48 +188,6 @@ class Environment:
         
         return self._get_observation()
     
-    def mask_action(self, action: float) -> float:
-        market_price = self._get_current_price()
-
-        if market_price <= 0:
-            return 0
-
-        # BUY
-        if action > 0:
-            requested_shares = int(self.max_trading_units * action)
-
-            if requested_shares <= 0:
-                return 0
-
-            max_affordable = int(self.balance / market_price)
-            shares_to_buy = min(requested_shares, max_affordable)
-
-            if shares_to_buy <= 0:
-                return 0
-
-            exec_price, fees, notional = self._calculate_transaction_cost(
-                side="buy",
-                shares=shares_to_buy,
-                market_price=market_price
-            )
-
-            total_cost = notional + fees
-
-            if self.balance < total_cost:
-                return 0
-
-        # SELL
-        elif action < 0:
-            requested_shares = int(self.max_trading_units * abs(action))
-
-            if requested_shares <= 0:
-                return 0
-
-            if self.shares_held <= 0:
-                return 0
-
-        return action
-    
     def step(self, action: float) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         # Record action
         self.actions_history.append(action)
@@ -282,14 +241,14 @@ class Environment:
         
         # Pad data if length is insufficient
         if start_idx == 0 and end_idx - start_idx < self.window_size:
-            market_data = np.zeros((self.window_size, self.feature_dim), dtype=np.float32)
+            market_data = np.zeros((self.window_size, self.data.shape[1]), dtype=np.float32)
             actual_data = self.data[start_idx:end_idx]
             market_data[-len(actual_data):] = actual_data
         else:
             market_data = self.data[start_idx:end_idx]
             
             if len(market_data) < self.window_size:
-                padding = np.zeros((self.window_size - len(market_data), self.feature_dim), dtype=np.float32)
+                padding = np.zeros((self.window_size - len(market_data), self.data.shape[1]), dtype=np.float32)
                 market_data = np.vstack([padding, market_data])
         
         # Calculate portfolio state
@@ -302,12 +261,12 @@ class Environment:
             self._get_episode_sharpe(),                              # sharpe ratio [-3, 3]
             self._get_current_drawdown(),                            # current drawdown [0, 1]
             self._get_win_rate(),                                    # win rate [0, 1]
-            self._get_episode_progress(),                            # episode progress [0, 1] # TODO remove this and updte portfolio dim related code to reflect 
         ], dtype=np.float32)
         
         observation = {
             'market_data': market_data[:, :self.n_market].astype(np.float32),
-            'temporal': market_data[-1, self.n_market:].astype(np.float32),
+            'temporal': market_data[-1, self.n_market:self.n_market + self.n_temporal].astype(np.float32),
+            'regime': market_data[-1, self.n_market + self.n_temporal:].astype(np.float32),
             'portfolio_state': portfolio_state
         }
         
@@ -349,10 +308,8 @@ class Environment:
         
         # SEC fee (currently zero, but structure left in place)
         if side == "sell":
-            sec_fee = notional * self.sec_fee
-            
-            # FINRA TAF (sell only)
-            taf_fee = min(shares * self.taf_fee, self.taf_fee_cap)
+            sec_fee = math.ceil(notional * self.sec_fee * 100) / 100  # round up to penny
+            taf_fee = min(math.ceil(shares * self.taf_fee * 100) / 100, self.taf_fee_cap)
         
         return sec_fee + taf_fee + cat_fee
 
@@ -371,6 +328,17 @@ class Environment:
         return execution_price, fees, notional
     
     def _execute_trade_action(self, action: float) -> None:
+        """
+        Target Position Action Space:
+            action in [-1, 1] maps to target shares in [0, max_trading_units].
+            -1 = hold 0 shares (all cash)
+             1 = hold max_trading_units shares (fully invested)
+            
+        The environment calculates the delta between current and target position
+        and executes trades only when the change exceeds a proportional deadband.
+        This allows SAC to maintain exploration entropy without triggering
+        micro-trades from policy noise.
+        """
         def update_avg_entry_price(old_avg, old_shares, buy_price, buy_shares):
             total_cost = old_avg * old_shares + buy_price * buy_shares
             total_shares = old_shares + buy_shares
@@ -382,76 +350,20 @@ class Environment:
             if self.logger:
                 self.logger.warning(f"Price is less than 0: {current_price}")
             return
-        
+            
         previous_shares = self.shares_held
+        self.shares_traded_at_step = 0
+        self.current_transaction_fee = 0
         
-        if not self.current_step + 1 >= self.episode_end:
-            if action > 0: # Buy
-                max_shares = int(self.balance / current_price)
-                shares_to_buy = min(max_shares, int(self.max_trading_units * action))
-                
-                if shares_to_buy > 0:
-                    exec_price, fees, notional = self._calculate_transaction_cost(
-                        side="buy",
-                        shares=shares_to_buy,
-                        market_price=current_price
-                    )
-                    total_cost = notional + fees
-                    
-                    if self.balance >= total_cost:
-                        self.avg_entry_price = update_avg_entry_price(self.avg_entry_price, self.shares_held, exec_price, shares_to_buy)
-                        self.balance -= total_cost
-                        self.shares_held += shares_to_buy
-                        self.total_shares_purchased += shares_to_buy
-                        self.total_transaction_fee += fees
-                        self.current_transaction_fee = fees
-                        self.shares_traded_at_step = shares_to_buy
-                        self.trade_execution_count += 1
-                        self.total_dollar_traded += notional
-                    else:
-                        self.invalid_actions_count += 1
-                else:
-                    self.invalid_actions_count += 1
+        # Convert [-1, 1] action to target shares [0, max_trading_units]
+        normalized_action = (action + 1) / 2.0
+        target_shares = int(self.max_trading_units * normalized_action)
+        
+        # Calculate delta between target and current position
+        shares_delta = target_shares - self.shares_held
 
-            elif action < 0: # Sell
-                shares_to_sell = min(
-                    self.shares_held,
-                    int(self.max_trading_units * abs(action))
-                )
-                
-                if shares_to_sell > 0:
-                    exec_price, fees, notional = self._calculate_transaction_cost(
-                        side="sell",
-                        shares=shares_to_sell,
-                        market_price=current_price
-                    )
-                    
-                    net_proceeds = notional - fees
-                    
-                    self.balance += net_proceeds
-                    self.shares_held -= shares_to_sell
-                    self.total_shares_sold += shares_to_sell
-                    self.total_sales_value = notional
-                    self.total_transaction_fee += fees
-                    self.current_transaction_fee = fees
-                    self.shares_traded_at_step = shares_to_sell
-                    self.trade_execution_count += 1
-                    self.total_dollar_traded += notional
-                else:
-                    self.invalid_actions_count += 1
-                
-                if self.shares_held == 0:
-                    self.completed_trades += 1
-                    if exec_price > self.avg_entry_price:
-                        self.winning_trades += 1
-                    self.avg_entry_price = 0
-
-            else: # Hold
-                self.shares_traded_at_step = 0
-        else:
-            if action >= 0:
-                self.invalid_actions_count += 1
-                
+        # Episode end: liquidate everything (must come before deadband)
+        if self.current_step + 1 >= self.episode_end:
             if self.shares_held > 0:
                 shares_to_sell = self.shares_held
                 exec_price, fees, notional = self._calculate_transaction_cost(
@@ -467,14 +379,79 @@ class Environment:
                 self.total_sales_value += notional
                 self.total_transaction_fee += fees
                 self.current_transaction_fee = fees
-                self.shares_traded_at_step = shares_to_sell
+                self.shares_traded_at_step = -shares_to_sell
                 self.trade_execution_count += 1
                 self.total_dollar_traded += notional
                 self.completed_trades += 1
                 if exec_price > self.avg_entry_price:
                     self.winning_trades += 1
                 self.avg_entry_price = 0
+                self.hold_times.append(self.hold_time)
+                self.hold_time = 0
+            return
+
+        # Proportional deadband: ignore changes smaller than ~7% of max position
+        deadband = max(int(self.max_trading_units * 0.07), 1)
+        if abs(shares_delta) < deadband:
+            if self.shares_held > 0:
+                self.hold_time += 1
+            return
+
+        if shares_delta > 0:  # Buy
+            max_affordable = int(self.balance / current_price)
+            shares_to_buy = min(max_affordable, shares_delta)
+            
+            if shares_to_buy > 0:
+                exec_price, fees, notional = self._calculate_transaction_cost(
+                    side="buy",
+                    shares=shares_to_buy,
+                    market_price=current_price
+                )
+                total_cost = notional + fees
                 
+                if self.balance >= total_cost:
+                    self.avg_entry_price = update_avg_entry_price(
+                        self.avg_entry_price, self.shares_held, exec_price, shares_to_buy
+                    )
+                    self.balance -= total_cost
+                    self.shares_held += shares_to_buy
+                    self.total_shares_purchased += shares_to_buy
+                    self.total_transaction_fee += fees
+                    self.current_transaction_fee = fees
+                    self.shares_traded_at_step = shares_to_buy
+                    self.trade_execution_count += 1
+                    self.total_dollar_traded += notional
+                else:
+                    self.invalid_actions_count += 1
+
+        elif shares_delta < 0:  # Sell
+            shares_to_sell = min(self.shares_held, abs(shares_delta))
+            
+            if shares_to_sell > 0:
+                exec_price, fees, notional = self._calculate_transaction_cost(
+                    side="sell",
+                    shares=shares_to_sell,
+                    market_price=current_price
+                )
+                net_proceeds = notional - fees
+                
+                self.balance += net_proceeds
+                self.shares_held -= shares_to_sell
+                self.total_shares_sold += shares_to_sell
+                self.total_sales_value += notional
+                self.total_transaction_fee += fees
+                self.current_transaction_fee = fees
+                self.shares_traded_at_step = -shares_to_sell
+                self.trade_execution_count += 1
+                self.total_dollar_traded += notional
+                
+                if self.shares_held == 0:
+                    self.completed_trades += 1
+                    if exec_price > self.avg_entry_price:
+                        self.winning_trades += 1
+                    self.avg_entry_price = 0
+
+        # Track hold time
         if self.shares_held > 0:
             self.hold_time += 1
         elif previous_shares > 0 and self.shares_held == 0:
@@ -565,7 +542,7 @@ class Environment:
         
         # return reward
         
-        return portfolio_return * 100
+        return np.clip(portfolio_return * 100, -10.0, 10.0)
     
     def _get_info(self) -> Dict[str, Any]:
         current_price = self._get_current_price()
@@ -601,7 +578,7 @@ class Environment:
             'turnover_ratio': self.total_dollar_traded / self.initial_balance,
             'avg_hold_time': np.array(self.hold_times).mean() if self.hold_times else 0,
             'invalid_actions_count': self.invalid_actions_count,
-            'sharpe_ratio': self._get_episode_sharpe(),
+            'sharpe_ratio': self._get_episode_sharpe() * np.sqrt(390 * 252), # annualized sharpe so it's human readable
             'current_drawdown': self._get_current_drawdown(),
             'max_drawdown': self.max_drawdown,
             'win_rate': self._get_win_rate(),

@@ -210,7 +210,7 @@ in your feature engineering rather than feeding raw VIXM bars into everything.
 TICKERS = [
 
     # ===== Core Market Structure =====
-    "SPY", "VOO", "IVV", "VTI", "QQQ",
+    "SPY", "VTI", "QQQ", # Big caps
     "IWM",          # Small caps
     "MDY",          # Mid caps
 
@@ -232,8 +232,8 @@ TICKERS = [
     "HYG",          # High yield credit
 
     # ===== Volatility =====
-    "VIXY",         # VIX ETF proxy
-    "UVXY",         # Leveraged vol (stress regime signal)
+    "VIXY",         # VIX ETF proxy short term
+    "VIXM",         # VIX ETF proxy mid term
 
     # ===== Dollar =====
     "UUP",          # Dollar index ETF
@@ -304,7 +304,7 @@ CUTOFF_TIMESTAMP = '2019-12-31 00:00:00+00:00'
 # Trading env config
 WINDOW_SIZE = 120
 INITIAL_BALANCE = 10000.0       # Initial trading balance
-MAX_TRADING_UNITS = 10          
+MAX_TRADING_UNITS = 30          
 # Regularly check https://alpaca.markets/support/regulatory-fees for updated fees
 SEC_FEE = 20.60 / 1000000   # per SEC_FEE_PRINCIPAL of principal (sells only) - this fee is rounded up to the nearest penny
 SEC_FEE_PRINCIPAL = 1000000
@@ -319,7 +319,7 @@ MULTIDAY_MINUTE_EPISODE_DAYS = 5
 HIDDEN_DIM = 128            # Hidden dim size
 LEARNING_RATE_ACTOR = 3e-4  # Actor NN learning rate
 LEARNING_RATE_CRITIC = 4.5e-4 # 3e-4 # Crtic NN learning rate
-LEARNING_RATE_ALPHA = 3e-4  # Optimizer learning rate (decrease to increase exploration (meaning alpha will reach 0 slower))
+LEARNING_RATE_ALPHA = 1e-4  # Optimizer learning rate (decrease to increase exploration (meaning alpha will reach 0 slower))
 ALPHA_INIT = 0.2            # Entropy temperature (controls how random the policy is, increase to increase exploration) 
 GAMMA = 0.99                # Discount factor increase for longer episodes (higher = cares more about long term rewards)
 GAMMA_MULTIDAY_MINUTE = 0.995 # 0.999

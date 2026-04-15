@@ -15,7 +15,7 @@ from src.utils.utils import create_directory, save_to_parquet
 # TODO add ipo info when doing daily data
 # TODO walk forward validation
 # train 5 days, valid the very next day, etc
-# TODO play around with look back windows (especially normalization)
+# TODO play around with look back windows (especially normalization windows)
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (must be top-level so ProcessPoolExecutor can pickle them)
@@ -134,7 +134,7 @@ def _apply_split_adjustments(
     # join_asof requires a Date key on the left; extract one from timestamp.
     # We keep the original timestamp column intact throughout.
     df = df.with_columns(
-        pl.col("timestamp").dt.date().alias("_bar_date")
+        (pl.col("timestamp").dt.date() + pl.duration(days=1)).alias("_bar_date")
     )
 
     # join_asof(strategy="forward") attaches, for each bar, the
@@ -834,7 +834,7 @@ class DataFeatureEngineer:
         # with other ungrouped names rather than being dropped.
         SECTOR_MAP: Dict[str, str] = {
             # broad market / size
-            "SPY": "broad_market", "VOO": "broad_market", "IVV": "broad_market",
+            "SPY": "broad_market",
             "VTI": "broad_market", "QQQ": "broad_market",
             "IWM": "broad_market", "MDY": "broad_market",
             # sector ETFs
@@ -849,7 +849,7 @@ class DataFeatureEngineer:
             "TLT": "fixed_income", "IEF": "fixed_income", "SHY": "fixed_income",
             "LQD": "fixed_income", "HYG": "fixed_income",
             # volatility
-            "VIXY": "volatility", "UVXY": "volatility",
+            "VIXY": "volatility", "VIXM": "volatility",
             # dollar
             "UUP": "fx",
             # commodities
@@ -1227,6 +1227,60 @@ class DataFeatureEngineer:
         stacked = stacked.with_columns(breadth_exprs)
 
         # ------------------------------------------------------------------
+        # VIX Term Structure: log(VIXY / VIXM)
+        #
+        # VIXY tracks short-term VIX futures, VIXM tracks mid-term.
+        # The ratio captures contango (< 0, complacent) vs backwardation
+        # (> 0, fear spike).  This is a shared regime feature (like breadth),
+        # not ticker-specific.
+        #
+        # No look-ahead: uses only the current bar's close prices.
+        # Normalized with causal rolling z-score afterwards.
+        # ------------------------------------------------------------------
+
+        VIX_TERM_WINDOWS = [5, 15, 60]
+
+        vixy_col = "VIXY_close"
+        vixm_col = "VIXM_close"
+
+        if vixy_col in stacked.columns and vixm_col in stacked.columns:
+            if self.logger:
+                self.logger.info("  Computing VIX term structure on full timeline...")
+
+            eps = 1e-8
+            stacked = stacked.with_columns(
+                (pl.col(vixy_col) / (pl.col(vixm_col) + eps)).log().alias("vix_term_structure")
+            )
+
+            # Rolling means to capture term structure trend at multiple horizons
+            vix_ts_exprs = [
+                pl.col("vix_term_structure")
+                .rolling_mean(window_size=w)
+                .alias(f"vix_term_structure_{w}m")
+                for w in VIX_TERM_WINDOWS
+            ]
+            stacked = (
+                stacked
+                .with_columns(vix_ts_exprs)
+                .drop("vix_term_structure")
+            )
+
+            # Normalize VIX term structure columns with causal rolling z-score
+            vix_ts_cols = [f"vix_term_structure_{w}m" for w in VIX_TERM_WINDOWS]
+            vix_arr = stacked.select(vix_ts_cols).to_numpy().astype(np.float64)
+            vix_scaled = _rolling_zscore_normalize_vectorized(vix_arr, window=NORMALIZATION_WINDOW)
+
+            stacked = stacked.with_columns([
+                pl.Series(col, vix_scaled[:, i])
+                for i, col in enumerate(vix_ts_cols)
+            ])
+        else:
+            if self.logger:
+                self.logger.warning(
+                    "VIXY/VIXM close columns not found — skipping VIX term structure"
+                )
+
+        # ------------------------------------------------------------------
         # Relative strength vs SPY
         #
         # rs_spy_Nm[t] = cumulative_return_ticker(t, N) - cumulative_return_SPY(t, N)
@@ -1280,6 +1334,37 @@ class DataFeatureEngineer:
                     pl.Series(col, scaled[:, i])
                     for i, col in enumerate(rs_cols)
                 ])
+
+        # ------------------------------------------------------------------
+        # Regime momentum: 1-bar and 5-bar deltas for breadth & VIX
+        #
+        # These capture direction and acceleration of regime signals.
+        # Computed after normalization so diffs are on z-scored values.
+        # No look-ahead: diff(n) uses only current and past bars.
+        # ------------------------------------------------------------------
+
+        DELTA_WINDOWS = [1, 5]
+
+        breadth_cols = [f"breadth_{w}m" for w in BREADTH_WINDOWS]
+        vix_ts_cols_delta = [f"vix_term_structure_{w}m" for w in VIX_TERM_WINDOWS]
+        regime_momentum_cols = [
+            c for c in breadth_cols + vix_ts_cols_delta
+            if c in stacked.columns
+        ]
+
+        if regime_momentum_cols:
+            if self.logger:
+                self.logger.info(
+                    f"  Computing regime momentum deltas for "
+                    f"{len(regime_momentum_cols)} columns..."
+                )
+
+            delta_exprs = [
+                pl.col(c).diff(n=d).fill_null(0.0).alias(f"{c}_delta_{d}")
+                for c in regime_momentum_cols
+                for d in DELTA_WINDOWS
+            ]
+            stacked = stacked.with_columns(delta_exprs)
 
         # ------------------------------------------------------------------
         # Phase 3: trim warmup period and split

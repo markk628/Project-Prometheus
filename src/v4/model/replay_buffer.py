@@ -11,25 +11,27 @@ class IndexReplayBuffer:
     market_data array. On sample, reconstructs windows and splits them
     into market features (AE latents) and temporal features.
  
-    The temporal features (last n_temporal columns) are only taken from
+    The temporal features (last temporal_state_len columns) are only taken from
     the final timestep of each window, since they're deterministic
     (time-of-day encodings) and don't need a full sequence.
     """
  
     def __init__(
         self,
-        market_data: np.ndarray,        # (T, F) — full dataset including temporal cols
+        market_data: np.ndarray,        # (T, F) — full dataset including temporal + regime cols
         window_size: int,
         portfolio_state_len: int,
+        temporal_state_len: int,            # number of temporal feature columns
+        regime_state_len: int,              # number of regime feature columns at the end
         action_dim: int,
         capacity: int,
-        n_temporal: int = 8,            # number of temporal feature columns at the end
     ):
         self.market_data = market_data
         self.window_size = window_size
         self.total_feature_dim = market_data.shape[1]
-        self.n_temporal = n_temporal
-        self.n_market = self.total_feature_dim - n_temporal
+        self.temporal_state_len = temporal_state_len
+        self.regime_state_len = regime_state_len
+        self.n_market = self.total_feature_dim - temporal_state_len - regime_state_len
         self.capacity = capacity
         self.ptr = 0
         self.size = 0
@@ -87,21 +89,25 @@ class IndexReplayBuffer:
         if ns_mask.any():
             ns_windows[ns_mask] = 0.0
  
-        # Split: market features (full window) vs temporal (last timestep only)
-        s_market = s_windows[:, :, :self.n_market]          # (B, W, 128)
-        s_temporal = s_windows[:, -1, self.n_market:]       # (B, 8)
+        # Split: market (full window), temporal (last timestep), regime (last timestep)
+        s_market = s_windows[:, :, :self.n_market]          # (B, W, n_market)
+        s_temporal = s_windows[:, -1, self.n_market:self.n_market + self.temporal_state_len]  # (B, 8)
+        s_regime = s_windows[:, -1, self.n_market + self.temporal_state_len:]   # (B, regime_state_len)
  
-        ns_market = ns_windows[:, :, :self.n_market]        # (B, W, 128)
-        ns_temporal = ns_windows[:, -1, self.n_market:]     # (B, 8)
+        ns_market = ns_windows[:, :, :self.n_market]        # (B, W, n_market)
+        ns_temporal = ns_windows[:, -1, self.n_market:self.n_market + self.temporal_state_len]  # (B, 8)
+        ns_regime = ns_windows[:, -1, self.n_market + self.temporal_state_len:]  # (B, regime_state_len)
  
         states = {
             "market_data": s_market,
             "temporal": s_temporal,
+            "regime": s_regime,
             "portfolio_state": self.portfolio_states[sample_idx],
         }
         next_states = {
             "market_data": ns_market,
             "temporal": ns_temporal,
+            "regime": ns_regime,
             "portfolio_state": self.next_portfolio_states[sample_idx],
         }
  

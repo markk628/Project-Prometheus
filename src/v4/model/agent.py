@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -32,6 +33,9 @@ class Agent:
     def __init__(
         self,
         market_data: np.ndarray,
+        temporal_state_len: int ,
+        regime_state_len: int,
+        total_episodes: int,
         action_dim: int = 1,
         hidden_dim: int = HIDDEN_DIM,
         d_model: int = 128,
@@ -51,8 +55,6 @@ class Agent:
         buffer_capacity: int = REPLAY_BUFFER_SIZE,
         input_shape: Tuple[int, int] = None,       # (window_size, market_feature_dim) — AE latents only
         portfolio_state_len: int = None,
-        temporal_state_len: int = 8,
-        n_temporal: int = 8,
         max_grad_norm: float = 1.0,
         target_entropy: float = None,
         logger: Optional[Logger] = None,
@@ -70,8 +72,9 @@ class Agent:
         # ── Networks ─────────────────────────────────────────────────────
         net_kwargs = dict(
             input_shape=input_shape,
-            portfolio_state_length=portfolio_state_len,
-            temporal_state_length=temporal_state_len,
+            portfolio_state_len=portfolio_state_len,
+            temporal_state_len=temporal_state_len,
+            regime_state_len=regime_state_len,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
             d_model=d_model,
@@ -89,11 +92,17 @@ class Agent:
             tp.data.copy_(sp.data)
 
         # ── Optimizers ───────────────────────────────────────────────────
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr) # TODO add weight decay if overfitting suspected
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr)
 
+        # ── Alpha and Entropy ────────────────────────────────────
         if self.use_automatic_entropy_tuning:
-            self.target_entropy = target_entropy if target_entropy is not None else -action_dim
+            self.current_episode = 0
+            self.total_episodes = total_episodes
+            # standard Gaussian (target entropy ≈ 1.42 + ln(sigma)) where sigma is noise applied to action
+            # meaning environment will randomly force anywhere from -sigma to +sigma to be applied to action
+            # calculate using sigma ≈ e^(target entropy - 1.42)
+            self.target_entropy = target_entropy if target_entropy is not None else -action_dim 
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
             self.alpha = self.log_alpha.exp()
             self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha_lr)
@@ -105,9 +114,10 @@ class Agent:
             market_data=market_data,
             window_size=window_size,
             portfolio_state_len=portfolio_state_len,
+            temporal_state_len=temporal_state_len,
+            regime_state_len=regime_state_len,
             action_dim=action_dim,
-            capacity=buffer_capacity,
-            n_temporal=n_temporal,
+            capacity=buffer_capacity
         )
 
         self.train_step_counter = 0
@@ -115,6 +125,17 @@ class Agent:
         self.critic_losses = []
         self.alpha_losses = []
         self.entropy_values = []
+        self.q_values = []
+
+        # ── Batch prefetching ────────────────────────────────────────────
+        self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        self._prefetch_future = None
+
+    def reset_prefetch(self):
+        """Call between episodes to discard any stale prefetched batch."""
+        if self._prefetch_future is not None:
+            self._prefetch_future.result()  # drain it
+            self._prefetch_future = None
 
     # ── Action selection ─────────────────────────────────────────────────
     def select_action(self, state: Dict[str, np.ndarray], validate: bool = False) -> np.ndarray:
@@ -142,8 +163,10 @@ class Agent:
             k: torch.as_tensor(v, dtype=torch.float, device=self.device)
             for k, v in state_dict.items()
         }
+        
+    def _get_alpha_floor(self) -> float:
+        return max(0.01 * (1 - self.current_episode / self.total_episodes), 1e-8)
 
-    # TODO track q values
     # ── SAC parameter update ─────────────────────────────────────────────
     def update_parameters(self, batch_size: int = BATCH_SIZE_MULTIDAY_MINUTE) -> Dict[str, float]:
         if len(self.replay_buffer) < batch_size:
@@ -153,9 +176,20 @@ class Agent:
                 "alpha_loss": 0.0,
                 "entropy": 0.0,
                 "alpha": self.alpha.item(),
+                'q_value': 0.0
             }
 
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
+        # Use prefetched batch if available, otherwise sample synchronously
+        if self._prefetch_future is not None:
+            states, actions, rewards, next_states, dones = self._prefetch_future.result()
+        else:
+            states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
+
+        # Kick off next batch prefetch immediately
+        self._prefetch_future = self._prefetch_executor.submit(
+            self.replay_buffer.sample, batch_size
+        )
+
         batched_states = self._batch_dict_to_tensor(states)
         batched_next_states = self._batch_dict_to_tensor(next_states)
 
@@ -171,6 +205,7 @@ class Agent:
             expected_q = batched_rewards + (1.0 - batched_dones) * self.gamma * next_q
 
         cur_q1, cur_q2 = self.critic(batched_states, batched_actions)
+        mean_q = torch.min(cur_q1, cur_q2).mean().item()
         critic_loss = F.mse_loss(cur_q1, expected_q) + F.mse_loss(cur_q2, expected_q)
 
         self.critic_optimizer.zero_grad()
@@ -196,7 +231,7 @@ class Agent:
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
-            self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clamp(self.log_alpha.exp(), min=self._get_alpha_floor())
             alpha_loss_val = alpha_loss.item()
 
         # ── Soft target update ───────────────────────────────────────────
@@ -206,17 +241,23 @@ class Agent:
                 tp.data.copy_(tp.data * (1.0 - self.tau) + sp.data * self.tau)
 
         # ── Book-keeping ─────────────────────────────────────────────────
-        self.actor_losses.append(actor_loss.item())
-        self.critic_losses.append(critic_loss.item())
+        actor_loss = actor_loss.item()
+        critic_loss = critic_loss.item()
+        mean_log_prob = log_probs.mean().item()
+        
+        self.actor_losses.append(actor_loss)
+        self.critic_losses.append(critic_loss)
         self.alpha_losses.append(alpha_loss_val)
-        self.entropy_values.append(-log_probs.mean().item())
+        self.entropy_values.append(-mean_log_prob)
+        self.q_values.append(mean_q)
 
         return {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss,
+            "critic_loss": critic_loss,
             "alpha_loss": alpha_loss_val,
-            "entropy": -log_probs.mean().item(),
+            "entropy": -mean_log_prob,
             "alpha": self.alpha.item(),
+            "q_value": mean_q
         }
 
     # ── Save / Load ──────────────────────────────────────────────────────
@@ -235,6 +276,8 @@ class Agent:
 
         if self.use_automatic_entropy_tuning:
             torch.save(self.log_alpha, model_path / "log_alpha.pth")
+            torch.save(self.current_episode, model_path / "current_episode.pth")
+            torch.save(self.total_episodes, model_path / "total_episodes.pth")
             torch.save(self.alpha_optimizer.state_dict(), model_path / "alpha_optimizer.pth")
 
         torch.save(
@@ -280,7 +323,9 @@ class Agent:
 
         if self.use_automatic_entropy_tuning:
             self.log_alpha = torch.load(model_path / "log_alpha.pth", map_location=self.device, weights_only=False)
-            self.alpha = self.log_alpha.exp()
+            self.current_episode = torch.load(model_path / "current_episode.pth", map_location=self.device, weights_only=False)
+            self.total_episodes = torch.load(model_path / "total_episodes.pth", map_location=self.device, weights_only=False)
+            self.alpha = torch.clamp(self.log_alpha.exp(), min=self._get_alpha_floor())
             self.alpha_optimizer.load_state_dict(torch.load(model_path / "alpha_optimizer.pth", map_location=self.device, weights_only=False))
 
         stats = torch.load(model_path / "training_stats.pth", map_location=self.device, weights_only=False)

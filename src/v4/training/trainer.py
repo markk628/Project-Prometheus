@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Union
 
 from src.config.config import (
     DATA_DIR,
+    TRAINING_LOGS_DIR,
     BATCH_SIZE_MULTIDAY_MINUTE,
     NUM_EPISODES,
     VALID_INTERVAL,
@@ -80,14 +81,18 @@ class Trainer:
         self.train_losses = []
         self.train_actions = []
         self.valid_actions = []
+        self.train_shares_traded = []
+        self.valid_shares_traded = []
 
         if self.logger:
             self.logger.info(
                 f"V4 Trainer initialized: {num_episodes} episodes, "
                 f"{self.train_env.feature_dim} market features, "
                 f"{self.train_env.n_temporal} temporal features, "
+                f"{self.train_env.n_regime} regime features, "
                 f"{self.train_env.PORTFOLIO_STATE_DIM} portfolio states, "
-                f"{batch_size} samples per batch"
+                f"{batch_size} samples per batch, "
+                f"{self.agent.target_entropy} target entropy"
             )
             self.logger.info("This is where the fun begins")
 
@@ -107,22 +112,24 @@ class Trainer:
                 self.train_env.current_step = train_randomized_start_idx_list.pop()
 
             state = self.train_env.reset()
+            self.agent.reset_prefetch()
             episode_train_rewards = []
             train_reward = 0
-            train_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, "alpha": 0}
+            train_loss = {"actor_loss": 0, "critic_loss": 0, "alpha_loss": 0, "entropy": 0, "alpha": 0, "q_value": 0}
             update_count = 0
             done = False
 
             self.train_actions = []
+            self.train_shares_traded = []
 
             self.agent.actor.train()
+            self.agent.current_episode = episode
             while not done:
                 state_idx = self.train_env.current_step
                 state_portfolio = state["portfolio_state"]
 
                 action = self.agent.select_action(state)
                 action_value = action[0] if isinstance(action, np.ndarray) else action
-                action_value = self.train_env.mask_action(action_value)
                 next_state, reward, done, info = self.train_env.step(action_value)
 
                 next_state_idx = self.train_env.current_step
@@ -139,6 +146,7 @@ class Trainer:
                 )
 
                 self.train_actions.append(action_value)
+                self.train_shares_traded.append(self.train_env.shares_traded_at_step)
 
                 if len(self.agent.replay_buffer) > self.batch_size:
                     update_count += 1
@@ -212,8 +220,8 @@ class Trainer:
                     f"\nFee Impact: {fee_impact:.2%}"
                     f"\nTotal Trade Count: {trade_execution_count}"
                     f"\nTurnover Ratio: {turnover_ratio:.2%}"
-                    f"\nAvg Hold Time: {avg_hold_time}"
-                    f"\nSharpe Ratio: {sharpe_ratio}"
+                    f"\nAvg Hold Time: {avg_hold_time:.2f}"
+                    f"\nSharpe Ratio: {sharpe_ratio:.2f}"
                     f"\nDrawdown: {max_drawdown:.2%}"
                     f"\nWin Rate: {win_rate:.2%}"
                     f"\nTotal Shares Traded: {info['total_shares_sold']}"
@@ -253,10 +261,12 @@ class Trainer:
             "alpha_losses": [loss["alpha_loss"] for loss in self.train_losses],
             "entropy_values": [loss["entropy"] for loss in self.train_losses],
             "alphas": [loss["alpha"] for loss in self.train_losses],
+            "q_values": [loss['q_value'] for loss in self.train_losses]
         }
 
     def validate(self, num_episodes: int = 1):
         self.valid_actions = []
+        self.valid_shares_traded = []
 
         for episode in range(1, num_episodes + 1):
             state = self.valid_env.reset()
@@ -268,12 +278,12 @@ class Trainer:
             while not done:
                 action = self.agent.select_action(state, validate=True)
                 action_value = action[0] if isinstance(action, np.ndarray) else action
-                action_value = self.valid_env.mask_action(action_value)
                 next_state, reward, done, info = self.valid_env.step(action_value)
                 state = next_state
                 valid_reward += reward
                 episode_valid_rewards.append(reward)
                 self.valid_actions.append(action_value)
+                self.valid_shares_traded.append(self.valid_env.shares_traded_at_step)
 
             net_return_pct = info["net_return_pct"]
             self.valid_returns.append(net_return_pct * 100)
@@ -331,33 +341,39 @@ class Trainer:
                     f"\nFee Impact: {fee_impact:.2%}"
                     f"\nTotal Trade Count: {trade_execution_count}"
                     f"\nTurnover Ratio: {turnover_ratio:.2%}"
-                    f"\nAvg Hold Time: {avg_hold_time}"
-                    f"\nSharpe Ratio: {sharpe_ratio}"
+                    f"\nAvg Hold Time: {avg_hold_time:.2f}"
+                    f"\nSharpe Ratio: {sharpe_ratio:.2f}"
                     f"\nDrawdown: {max_drawdown:.2%}"
                     f"\nWin Rate: {win_rate:.2%}"
                     f"\nTotal Shares Traded: {info['total_shares_sold']}"
                     f"\n{'='*50}"
                 )
 
-    def _plot_price_with_actions(self, prices, actions, save_path, title: str) -> None:
+    def _plot_price_with_actions(self, prices, actions, shares_traded, save_path, title: str) -> None:
         if prices is None or actions is None:
             return
         if len(prices) == 0 or len(actions) == 0:
             return
 
         actions = np.array(actions)
-        min_len = min(len(prices), len(actions))
+        shares_traded = np.array(shares_traded) if shares_traded is not None else np.ones(len(actions))
+        min_len = min(len(prices), len(actions), len(shares_traded))
         prices = prices[:min_len]
         actions = actions[:min_len]
+        shares_traded = shares_traded[:min_len]
 
         plt.figure(figsize=(12, 6))
         plt.plot(prices, label="Price", color="blue", linewidth=1)
 
-        buy_mask = actions > 0
-        sell_mask = actions < 0
+        # Use sign of shares_traded: positive = buy, negative = sell
+        buy_mask = shares_traded > 0
+        sell_mask = shares_traded < 0
 
         buy_indices = np.where(buy_mask)[0]
         sell_indices = np.where(sell_mask)[0]
+
+        abs_traded = np.abs(shares_traded)
+        max_traded = abs_traded.max() if abs_traded.max() > 0 else 1
 
         if len(buy_indices) > 0:
             plt.scatter(
@@ -365,7 +381,7 @@ class Trainer:
                 prices[buy_indices],
                 marker="^",
                 c="green",
-                alpha=np.clip(np.abs(actions[buy_indices]), 0, 1),
+                alpha=np.clip(abs_traded[buy_indices] / max_traded, 0.2, 1),
                 s=60,
             )
 
@@ -375,7 +391,7 @@ class Trainer:
                 prices[sell_indices],
                 marker="v",
                 c="red",
-                alpha=np.clip(np.abs(actions[sell_indices]), 0, 1),
+                alpha=np.clip(abs_traded[sell_indices] / max_traded, 0.2, 1),
                 s=60,
             )
 
@@ -415,6 +431,7 @@ class Trainer:
             {"key": "alpha_loss", "title": "Alpha Losses", "ylabel": "Loss", "filename": "alpha_loss.png"},
             {"key": "entropy", "title": "Policy Entropy", "ylabel": "Entropy", "filename": "entropy.png"},
             {"key": "alpha", "title": "Alpha", "ylabel": "Alpha", "filename": "alpha.png"},
+            {"key": "q_value", "title": "Q Values", "ylabel": "Q", "filename": "q_values.png"},
         ]
 
         for metric in metrics:
@@ -537,6 +554,7 @@ class Trainer:
         self._plot_price_with_actions(
             prices=self.train_env.prices[self.train_env.current_step - self.train_env.current_step_in_episode : self.train_env.current_step],
             actions=self.train_actions,
+            shares_traded=self.train_shares_traded,
             save_path=actions_dir / f"train_actions{episode}.png",
             title="Train Price with Actions",
         )
@@ -544,6 +562,7 @@ class Trainer:
         self._plot_price_with_actions(
             prices=self.valid_env.prices[self.valid_env.current_step - self.valid_env.current_step_in_episode : self.valid_env.current_step],
             actions=self.valid_actions,
+            shares_traded=self.valid_shares_traded,
             save_path=actions_dir / f"valid_actions{episode}.png",
             title="Validation Price with Actions",
         )
@@ -579,13 +598,15 @@ class Trainer:
 def main():
     np.random.seed(SEED)
     torch.manual_seed(SEED)
+    
+    create_directory(TRAINING_LOGS_DIR)
 
     ticker = "TSLA"
 
-    train_data_dir = f"{DATA_DIR}/preprocessed/v4/unified_latent/unified_latent_train_v2.parquet"
+    train_data_dir = f"{DATA_DIR}/preprocessed/v4/unified_latent/unified_latent_train_v4.parquet"
     train_data = load_stock_data(train_data_dir)
 
-    valid_data_dir = f"{DATA_DIR}/preprocessed/v4/unified_latent/unified_latent_valid_v2.parquet"
+    valid_data_dir = f"{DATA_DIR}/preprocessed/v4/unified_latent/unified_latent_valid_v4.parquet"
     valid_data = load_stock_data(valid_data_dir)
 
     def prepare_df(df: pl.DataFrame) -> pl.DataFrame:
@@ -611,15 +632,18 @@ def main():
     action_dim = train_env.action_space.shape[0]
     portfolio_dim = train_env.PORTFOLIO_STATE_DIM
     temporal_dim = train_env.n_temporal
+    regime_dim = train_env.n_regime
+    
+    total_episodes = 1000
 
     agent = Agent(
         market_data=train_env.data,
+        temporal_state_len=temporal_dim,
+        regime_state_len=regime_dim,
+        total_episodes=total_episodes,
         action_dim=action_dim,
         input_shape=(train_env.window_size, train_env.feature_dim),  # feature_dim = market features only
         portfolio_state_len=portfolio_dim,
-        temporal_state_len=temporal_dim,
-        n_temporal=temporal_dim,
-        target_entropy=-0.5,        # prevent alpha collapse (default -1.0 is too aggressive)
     )
 
     models_dir = f"{MODELS_DIR}/v4"
@@ -630,12 +654,12 @@ def main():
         train_env=train_env,
         valid_env=valid_env,
         randomize_trading_days=True,
-        num_episodes=1000,
+        num_episodes=total_episodes,
         valid_interval=10,
         save_interval=50,
         models_dir=models_dir,
         results_dir=results_dir,
-        logger=Logger(),
+        logger=Logger(f"{TRAINING_LOGS_DIR}/log.txt"),
     )
 
     _ = trainer.train()

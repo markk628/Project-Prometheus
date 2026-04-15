@@ -3,6 +3,7 @@ import joblib
 import math
 import numpy as np
 import polars as pl
+import re
 import torch
 import torch.nn as nn
 from sklearn.decomposition import IncrementalPCA, PCA
@@ -10,11 +11,10 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Tuple
 
-from src.config.config import ROOT_DIR, DATA_DIR, DEVICE
+from src.config.config import ROOT_DIR, DATA_DIR, DEVICE, TICKERS
 from src.utils.logger import Logger
 from src.utils.utils import save_to_parquet, create_directory
 
-# TODO don't compress regime features (cross sectional features)
 """
 TODO
 Target-Aware Compression: Instead of a vanilla autoencoder that just rebuilds the input, 
@@ -115,6 +115,7 @@ class DataDimensionalReducer:
         
         self.closes_dfs = None
         self.temporal_dfs = None
+        self.regime_dfs = None
         
     def _fetch_unified_data(self) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         self.logger.info("Fetching data...")
@@ -135,7 +136,17 @@ class DataDimensionalReducer:
             "day_sin", "day_cos",
             "minutes_since_open", "minutes_to_close"
         ]
-        features_to_drop = temporal_features + closes_features
+        pattern = re.compile('|'.join(TICKERS))
+        regime_features = [
+            feature for feature in train.columns 
+            if (not pattern.search(feature) 
+                or 'rs_spy' in feature 
+                or '_cs_zscore' in feature 
+                or '_sector_zscore' in feature)
+            and feature not in temporal_features
+            and feature not in closes_features
+        ]
+        features_to_drop = temporal_features + closes_features + regime_features
         
         train_closes = train.select(pl.col(closes_features))
         valid_closes = valid.select(pl.col(closes_features))
@@ -144,6 +155,10 @@ class DataDimensionalReducer:
         train_temporal = train.select(pl.col(temporal_features))
         valid_temporal = valid.select(pl.col(temporal_features))
         test_temporal = test.select(pl.col(temporal_features))
+        
+        train_regime = train.select(pl.col(regime_features))
+        valid_regime = valid.select(pl.col(regime_features))
+        test_regime = test.select(pl.col(regime_features))
         
         self.closes_dfs = {
             'train': train_closes,
@@ -155,6 +170,12 @@ class DataDimensionalReducer:
             'train': train_temporal,
             'valid': valid_temporal,
             'test': test_temporal
+        }
+        
+        self.regime_dfs = {
+            'train': train_regime,
+            'valid': valid_regime,
+            'test': test_regime
         }
         
         self.logger.info(f"Dropped features: {features_to_drop}")
@@ -503,13 +524,13 @@ class DataDimensionalReducer:
         
         match (version):
             case 1:
-                train, valid, test = self._reduce_dimension_v1(train, valid, test)
+                train, valid, test = self._reduce_dimension_v1(train, valid, test, latent_dim=128, epochs=100)
             case 2:
                 train, valid, test = self._reduce_dimension_v2(train, valid, test, latent_dim=128, epochs=100)
             case 3:
                 train, valid, test = self._reduce_dimension_v3(train, valid, test)
             case 4:
-                train, valid, test = self._reduce_dimension_v4(train, valid, test)
+                train, valid, test = self._reduce_dimension_v4(train, valid, test, latent_dim=128, epochs=100)
             case _:
                 self.logger.error('Invalid version')
                 
@@ -523,9 +544,13 @@ class DataDimensionalReducer:
         valid_temporal = self.temporal_dfs['valid']
         test_temporal = self.temporal_dfs['test']
         
-        train = pl.concat([train, train_temporal, train_closes], how="horizontal")
-        valid = pl.concat([valid, valid_temporal, valid_closes], how="horizontal")
-        test  = pl.concat([test, test_temporal, test_closes], how="horizontal")
+        train_regime = self.regime_dfs['train']
+        valid_regime = self.regime_dfs['valid']
+        test_regime = self.regime_dfs['test']
+        
+        train = pl.concat([train, train_temporal, train_closes, train_regime], how="horizontal")
+        valid = pl.concat([valid, valid_temporal, valid_closes, valid_regime], how="horizontal")
+        test  = pl.concat([test, test_temporal, test_closes, test_regime], how="horizontal")
         
         out_dir = f"{self.data_dir}/unified_latent"
         create_directory(out_dir)
@@ -539,8 +564,9 @@ class DataDimensionalReducer:
         
         
 def main():
+    
     dimensional_reducer = DataDimensionalReducer(Logger())
-    dimensional_reducer.reduce_dimension(2)
+    dimensional_reducer.reduce_dimension(4)
     
 if __name__ == '__main__':
     main()

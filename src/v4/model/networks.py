@@ -105,7 +105,7 @@
 #     def __init__(
 #         self,
 #         input_shape: Tuple[int, int],    # (window_size, feature_dim)
-#         portfolio_state_length: int,
+#         portfolio_state_len: int,
 #         action_dim: int = 1,
 #         hidden_dim: int = HIDDEN_DIM,
 #         d_model: int = 128,
@@ -134,7 +134,7 @@
 #         )
 
 #         self.portfolio_fc = nn.Sequential(
-#             nn.Linear(portfolio_state_length, hidden_dim // 4),
+#             nn.Linear(portfolio_state_len, hidden_dim // 4),
 #             nn.GELU(),
 #         )
 
@@ -195,7 +195,7 @@
 #     def __init__(
 #         self,
 #         input_shape: Tuple[int, int],
-#         portfolio_state_length: int,
+#         portfolio_state_len: int,
 #         action_dim: int = 1,
 #         hidden_dim: int = HIDDEN_DIM,
 #         d_model: int = 128,
@@ -220,7 +220,7 @@
 #             dropout=dropout,
 #         )
 #         self.q1_portfolio_fc = nn.Sequential(
-#             nn.Linear(portfolio_state_length, hidden_dim // 4), nn.GELU()
+#             nn.Linear(portfolio_state_len, hidden_dim // 4), nn.GELU()
 #         )
 #         self.q1_action_fc = nn.Sequential(
 #             nn.Linear(action_dim, hidden_dim // 4), nn.GELU()
@@ -244,7 +244,7 @@
 #             dropout=dropout,
 #         )
 #         self.q2_portfolio_fc = nn.Sequential(
-#             nn.Linear(portfolio_state_length, hidden_dim // 4), nn.GELU()
+#             nn.Linear(portfolio_state_len, hidden_dim // 4), nn.GELU()
 #         )
 #         self.q2_action_fc = nn.Sequential(
 #             nn.Linear(action_dim, hidden_dim // 4), nn.GELU()
@@ -396,8 +396,9 @@ class Actor(nn.Module):
     def __init__(
         self,
         input_shape: Tuple[int, int],        # (window_size, market_feature_dim)
-        portfolio_state_length: int,
-        temporal_state_length: int = 8,
+        portfolio_state_len: int,
+        temporal_state_len: int,
+        regime_state_len: int,
         action_dim: int = 1,
         hidden_dim: int = HIDDEN_DIM,
         d_model: int = 128,
@@ -427,18 +428,26 @@ class Actor(nn.Module):
 
         # Portfolio: 8 → 32
         self.portfolio_fc = nn.Sequential(
-            nn.Linear(portfolio_state_length, hidden_dim // 4),
+            nn.Linear(portfolio_state_len, hidden_dim // 4),
             nn.GELU(),
         )
 
         # Temporal: 8 → 32 (bypasses encoder, injected at fusion)
         self.temporal_fc = nn.Sequential(
-            nn.Linear(temporal_state_length, hidden_dim // 4),
+            nn.Linear(temporal_state_len, hidden_dim // 4),
             nn.GELU(),
         )
 
-        # encoder(256) + portfolio(32) + temporal(32) = 320 → trunk
-        fusion_dim = self.encoder.out_dim + hidden_dim // 4 + hidden_dim // 4
+        # Regime: 2-layer MLP on last-timestep snapshot (no sequential encoding needed)
+        self.regime_fc = nn.Sequential(
+            nn.Linear(regime_state_len, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+        )
+
+        # encoder(256) + portfolio(32) + temporal(32) + regime(64) → trunk
+        fusion_dim = self.encoder.out_dim + hidden_dim // 4 + hidden_dim // 4 + hidden_dim // 2
         self.trunk = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
@@ -466,7 +475,12 @@ class Actor(nn.Module):
             temporal = temporal.unsqueeze(0)
         temporal_features = self.temporal_fc(temporal)
 
-        x = torch.cat([market_features, portfolio_features, temporal_features], dim=1)
+        regime = state["regime"]
+        if regime.dim() == 1:
+            regime = regime.unsqueeze(0)
+        regime_features = self.regime_fc(regime)
+
+        x = torch.cat([market_features, portfolio_features, temporal_features, regime_features], dim=1)
         x = self.trunk(x)
 
         mean = self.mean_head(x)
@@ -500,8 +514,9 @@ class Critic(nn.Module):
     def __init__(
         self,
         input_shape: Tuple[int, int],
-        portfolio_state_length: int,
-        temporal_state_length: int = 8,
+        portfolio_state_len: int,
+        temporal_state_len: int,
+        regime_state_len: int,
         action_dim: int = 1,
         hidden_dim: int = HIDDEN_DIM,
         d_model: int = 128,
@@ -525,17 +540,20 @@ class Critic(nn.Module):
             n_transformer_layers=n_transformer_layers,
             dropout=dropout,
         )
+        self.q1_regime_fc = nn.Sequential(
+            nn.Linear(regime_state_len, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim // 2), nn.GELU(),
+        )
         self.q1_portfolio_fc = nn.Sequential(
-            nn.Linear(portfolio_state_length, hidden_dim // 4), nn.GELU()
+            nn.Linear(portfolio_state_len, hidden_dim // 4), nn.GELU()
         )
         self.q1_temporal_fc = nn.Sequential(
-            nn.Linear(temporal_state_length, hidden_dim // 4), nn.GELU()
+            nn.Linear(temporal_state_len, hidden_dim // 4), nn.GELU()
         )
         self.q1_action_fc = nn.Sequential(
             nn.Linear(action_dim, hidden_dim // 4), nn.GELU()
         )
-        # encoder(256) + portfolio(32) + temporal(32) + action(32) = 352
-        q1_fusion_dim = self.q1_encoder.out_dim + hidden_dim // 4 + hidden_dim // 4 + hidden_dim // 4
+        q1_fusion_dim = self.q1_encoder.out_dim + hidden_dim // 2 + hidden_dim // 4 * 3
         self.q1_trunk = nn.Sequential(
             nn.Linear(q1_fusion_dim, hidden_dim),
             nn.GELU(),
@@ -553,16 +571,20 @@ class Critic(nn.Module):
             n_transformer_layers=n_transformer_layers,
             dropout=dropout,
         )
+        self.q2_regime_fc = nn.Sequential(
+            nn.Linear(regime_state_len, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim // 2), nn.GELU(),
+        )
         self.q2_portfolio_fc = nn.Sequential(
-            nn.Linear(portfolio_state_length, hidden_dim // 4), nn.GELU()
+            nn.Linear(portfolio_state_len, hidden_dim // 4), nn.GELU()
         )
         self.q2_temporal_fc = nn.Sequential(
-            nn.Linear(temporal_state_length, hidden_dim // 4), nn.GELU()
+            nn.Linear(temporal_state_len, hidden_dim // 4), nn.GELU()
         )
         self.q2_action_fc = nn.Sequential(
             nn.Linear(action_dim, hidden_dim // 4), nn.GELU()
         )
-        q2_fusion_dim = self.q2_encoder.out_dim + hidden_dim // 4 + hidden_dim // 4 + hidden_dim // 4
+        q2_fusion_dim = self.q2_encoder.out_dim + hidden_dim // 2 + hidden_dim // 4 * 3
         self.q2_trunk = nn.Sequential(
             nn.Linear(q2_fusion_dim, hidden_dim),
             nn.GELU(),
@@ -584,22 +606,28 @@ class Critic(nn.Module):
         if temporal.dim() == 1:
             temporal = temporal.unsqueeze(0)
 
+        regime = state["regime"]
+        if regime.dim() == 1:
+            regime = regime.unsqueeze(0)
+
         if action.dim() == 1:
             action = action.unsqueeze(0)
 
         # Q1
         q1_market = self.q1_encoder(state["market_data"])
+        q1_r = self.q1_regime_fc(regime)
         q1_p = self.q1_portfolio_fc(portfolio)
         q1_t = self.q1_temporal_fc(temporal)
         q1_a = self.q1_action_fc(action)
-        q1 = self.q1_trunk(torch.cat([q1_market, q1_p, q1_t, q1_a], dim=1))
+        q1 = self.q1_trunk(torch.cat([q1_market, q1_r, q1_p, q1_t, q1_a], dim=1))
 
         # Q2
         q2_market = self.q2_encoder(state["market_data"])
+        q2_r = self.q2_regime_fc(regime)
         q2_p = self.q2_portfolio_fc(portfolio)
         q2_t = self.q2_temporal_fc(temporal)
         q2_a = self.q2_action_fc(action)
-        q2 = self.q2_trunk(torch.cat([q2_market, q2_p, q2_t, q2_a], dim=1))
+        q2 = self.q2_trunk(torch.cat([q2_market, q2_r, q2_p, q2_t, q2_a], dim=1))
 
         return q1, q2
 

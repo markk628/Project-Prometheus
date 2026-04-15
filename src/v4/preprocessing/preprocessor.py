@@ -16,7 +16,7 @@ class DataPreprocessor:
         print('='*100)
         self.auditor.audit()
         print('='*100)
-        version = 2
+        version = 4
         self.dimensional_reducer.reduce_dimension(version)
         print('='*100)
         data_dir = f"{DATA_DIR}/preprocessed/v4/"
