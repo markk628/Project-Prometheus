@@ -429,11 +429,6 @@ class DataPreprocessor:
         df_test = clip_first_and_last_day(df_test)
         
         return df_train, df_valid, df_test
-
-    # def _normalize_data(self, df_train: pd.DataFrame, df_valid: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    #     # stats = df_train.describe() # TODO after setting up a working env use describe() to determine which features to normalize
-    #     for col in df_train.columns:
-    #         if col not in TEMPORAL_FEATURES:
                 
     def _preprocess_and_save_data(self, ticker: str, timestamp: str) -> None:
         """
@@ -449,7 +444,7 @@ class DataPreprocessor:
         
         df = self._get_data(ticker)
         df = self._handle_gaps(df)
-        # TODO keep it simple until environment is set up
+        # keep it simple until environment is set up
         # df = self._add_technical_indicators(df)
         # df = self._add_temporal_patterns(df)
         # df = self._add_last_significant_change(df, threshold=0.001)
@@ -460,7 +455,7 @@ class DataPreprocessor:
         # df = self._add_OHLC_ratios(df)
         df = self._add_temporal_patterns(df)
         df['log_return_1'] = np.log(df['close'] / df['close'].shift(1))
-        df['volume_log'] = np.log1p(df['volume']) # TODO volume_log_norm = (volume_log - volume_log.mean()) / volume_log.std() instead of scaling use this instead MAKE SURE THERE IS NO DATA LEAK
+        df['volume_log'] = np.log1p(df['volume'])
         df['price_vwap_distance'] = (df["close"] - df["vwap"]) / df["vwap"]
         df = df.drop(['open', 'high', 'low', 'transactions', 'volume', 'vwap'], axis=1) 
         

@@ -111,7 +111,6 @@ class Backtester:
         )
 
         # Max drawdown (on compounded equity)
-         # TODO add when previous episode's balance carries over for now use the one below
         # equity_curve = (1 + daily_returns).cumprod()
         # rolling_max = equity_curve.cummax()
         # drawdown = (equity_curve - rolling_max) / rolling_max

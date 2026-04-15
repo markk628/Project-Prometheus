@@ -229,8 +229,7 @@ class DataPreprocessor:
         volume = df['volume']
         vwap = df['vwap']
         
-        df['volume_log'] = np.log1p(df['volume']) # TODO volume_log_norm = (volume_log - volume_log.rolling(15).mean()) / volume_log.rolling(15).std() instead of scaling use this instead MAKE SURE THERE IS NO DATA LEAK
-        
+        df['volume_log'] = np.log1p(df['volume']) 
         df['volume_ratio_15m'] = volume / ta.EMA(volume, timeperiod=15)
         df['volume_ratio_15m'] = np.log1p(df['volume_ratio_15m'])
         
