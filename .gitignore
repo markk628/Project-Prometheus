@@ -3,3 +3,5 @@ __pycache__/
 /models
 /results
 /src/config/.env
+/src/**/*.pkl
+/src/**/*.pt

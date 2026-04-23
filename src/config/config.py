@@ -191,106 +191,103 @@ DATA_DIR = ROOT_DIR / "data"                                                    
 LOGS_DIR = ROOT_DIR / "logs"                                                       # Logs dir
 TRAINING_LOGS_DIR = LOGS_DIR / "training"                                          # Training logs dir
 TRADING_LOGS_DIR = LOGS_DIR / "trading"                                            # Trading logs dir
+PREPROCESSING_LOGS_DIR = LOGS_DIR / "preprocessing"                                      # Preprocessing logs dir
 MODELS_DIR = ROOT_DIR / "models"                                                   # Models dir
 RESULTS_DIR = ROOT_DIR / "results"                                                 # Results dir
 
 # Stock tickers config
-# TODO
-"""
-Redundancy you could trim: You have SPY, VOO, and IVV — these are functionally identical 
-S&P 500 trackers. Keep SPY (most liquid, tightest spreads) and drop the other two. 
-Same with UVXY and VIXY — UVXY is 1.5× leveraged VIXY, so the information content is almost 
-identical. Keep VIXY, drop UVXY. That frees up slots without losing signal.
-On VIXM for regime features: Worth adding. The VIXY/VIXM ratio (short-term vs mid-term VIX futures)
-is one of the cleanest regime indicators in finance. When VIXY > VIXM (backwardation), the market
-is in panic mode. When VIXY < VIXM (contango), it's complacent. Compute this as a derived feature 
-in your feature engineering rather than feeding raw VIXM bars into everything.
-"""
+#
+# TODO(v5.1): audit regime ticker utilization + design new regime features.
+#
+# Post-Option B, regime tickers are not trained on or traded, and breadth
+# is restricted to tradables only (to avoid double-counting XLK with its
+# tech constituents, etc.). As a consequence, most of the tickers in the
+# list below currently contribute ZERO signal to the unified parquet —
+# feature engineering processes their per-ticker parquets, includes them
+# in the stacked frame, and then Option B's final prune drops them out
+# without any shared regime feature having referenced their columns.
+#
+# Current actual utilization:
+#   SPY  -> drives rs_spy_* for every tradable (active, used)
+#   VIXY -> half of vix_term_structure_* via log(VIXY/VIXM) (active, used)
+#   VIXM -> other half of vix_term_structure_* (active, used)
+#   SPY_close -> preserved as a benchmark reference column only
+#
+#   Everyone else (XLK, XLF, XLE, XLV, XLI, XLY, XLP, XLU, XLB, XLRE, XLC,
+#   TLT, IEF, SHY, HYG, LQD, UUP, GLD, USO, EFA, EEM, EWJ, QQQ, IWM, MDY)
+#   -> currently dead weight. Processed through feature engineering but
+#   no feature references their closes. Dropped by the Option B prune.
+#
+# This wasn't the intent — Option B was about "don't train on these",
+# not "contribute nothing". The fix is to design shared regime features
+# that explicitly use these ETFs' closes, analogous to how VIX term
+# structure uses VIXY/VIXM. Candidates:
+#
+#   Sector rotation     -> rolling rank/correlation across the 11 XL* ETFs
+#   Yield curve         -> TLT/SHY or TLT/IEF ratio
+#   Credit spread       -> HYG/LQD ratio (risk-on vs risk-off)
+#   Dollar regime       -> UUP return/trend
+#   Commodities regime  -> GLD, USO returns as regime signals
+#   International       -> EFA, EEM, EWJ vs SPY relative strength
+#   Size factor         -> IWM/SPY, MDY/SPY
+#   Growth factor       -> QQQ/SPY
+#
+# Potential addition: crypto regime.
+#   Adding e.g. BITO to this list alone does NOTHING by itself. Would need
+#   a corresponding shared feature computation such as:
+#     btc_spy_correlation_60d = rolling_corr(BITO_log_return_1, SPY_log_return_1, 60)
+#   Caveats: (1) BITO launched Oct 2021 → ~17 of 21 training years will
+#   have this feature as 0, higher zero-padding than XLC. (2) spot BTC
+#   via CoinGecko/Kraken (back to ~2014) is a cleaner alternative but
+#   requires data plumbing outside Polygon. (3) BTC-equity coupling is
+#   non-stationary across sub-periods — validate on fold years containing
+#   regime shifts (2021 euphoria, 2022 tightening, 2024 ETF adoption).
+#
+# Approach: bundle this into one coherent v5.1 design pass rather than
+# adding features one at a time. Ship the current baseline first to see
+# what the SPY+VIX regime signal alone produces.
+REGIME_TICKERS = [
+    # ===== Broad Market =====
+    "SPY",          # S&P 500
+    "QQQ",          # Nasdaq 100
+    "IWM",          # Russell 2000 (small cap)
+    "MDY",          # S&P 400 (mid cap)
 
-TICKERS = [
+    # ===== Sector ETFs (all 11 GICS sectors) =====
+    "XLK",          # Technology
+    "XLF",          # Financials
+    "XLE",          # Energy
+    "XLV",          # Healthcare
+    "XLI",          # Industrials
+    "XLY",          # Consumer Discretionary
+    "XLP",          # Consumer Staples
+    "XLU",          # Utilities
+    "XLB",          # Materials
+    "XLRE",         # Real Estate
+    "XLC",          # Communication Services
 
-    # ===== Core Market Structure =====
-    "SPY", "VTI", "QQQ", # Big caps
-    "IWM",          # Small caps
-    "MDY",          # Mid caps
-
-    # ===== Sector ETFs =====
-    "XLK", "XLF", "XLE", "XLV", "XLI",
-    "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
-
-    # ===== International =====
-    "EFA",          # Developed ex-US
-    "EEM",          # Emerging markets
-    "FXI",          # China
-    "EWJ",          # Japan
-
-    # ===== Rates & Bonds =====
-    "TLT",          # Long duration
-    "IEF",          # 7-10 year
-    "SHY",          # Short duration
-    "LQD",          # Investment grade credit
-    "HYG",          # High yield credit
+    # ===== Fixed Income =====
+    "TLT",          # 20+ year treasuries
+    "IEF",          # 7-10 year treasuries
+    "SHY",          # 1-3 year treasuries
+    "HYG",          # High yield corporate
+    "LQD",          # Investment grade corporate
 
     # ===== Volatility =====
-    "VIXY",         # VIX ETF proxy short term
-    "VIXM",         # VIX ETF proxy mid term
+    "VIXY",         # VIX short-term futures
+    "VIXM",         # VIX mid-term futures
 
     # ===== Dollar =====
-    "UUP",          # Dollar index ETF
+    "UUP",          # US Dollar Index
 
     # ===== Commodities =====
     "GLD",          # Gold
-    "SLV",          # Silver
     "USO",          # Oil
-    "DBA",          # Agriculture
 
-    # ===== Defense / Industrial =====
-    "ITA",
-
-    # ===== Real Assets =====
-    "VNQ",          # REIT ETF
-    "AMT", "PLD",
-
-    # ===== Financial Sensitivity =====
-    "JPM", "BAC", "GS", "KKR", "BRK.B",
-
-    # ===== Energy / Materials Leaders =====
-    "XOM", "CVX", "COP", "FCX", "NEM",
-    
-    # ===== Semiconductor Supply Chain =====
-    "TSM",          # Foundry
-    "ASML",         # Lithography
-    "AMAT",         # Equipment
-    "LRCX",         # Equipment
-    "KLAC",         # Inspection
-    "AMKR",         # Packaging
-    "ASX",          # Materials
-    "MU",           # Memory
-    "SOXX", "SMH",  # Sector ETFs
-
-    # ===== Mega Cap Tech =====
-    "AAPL", "MSFT", "NVDA", "AMZN",
-    "GOOGL", "FB", "META", "TSLA", "AMD",
-    
-    # ===== Enterprise / Legacy Tech =====
-    "IBM", "ORCL", "CSCO", "ACN",
-
-    # ===== Defensive Staples / Healthcare =====
-    "PG", "KO", "WMT", "JNJ", "UNH",
-
-    # ===== Emerging Tech / High Beta =====
-    "ARKK", "MRNA", "SHOP", "NET", "ROKU", "TWLO"
-]
-TICKER_ALIASES = [
-    {
-        "current_ticker": "META",
-        "previous_tickers": [
-            {
-                "symbol": "FB",
-                "change_date": datetime(2022, 6, 9, tzinfo=timezone.utc)
-            }
-        ]
-    }
+    # ===== International =====
+    "EFA",          # Developed markets ex-US
+    "EEM",          # Emerging markets
+    "EWJ",          # Japan (yen carry trade / BoJ divergence signal)
 ]
 
 # Data config
@@ -299,12 +296,30 @@ DATA_START_DATE = '2000-01-01'
 DATA_END_DATE = '2026-03-04'
 
 # Preprocessing config
-CUTOFF_TIMESTAMP = '2019-12-31 00:00:00+00:00'
+#
+# Warmup math: the longest causal dependency chain is a 60-day upstream
+# window (e.g. ema_20_60_ratio, log_return_60) followed by a 252-day
+# rolling z-score normalization. That's ~312 trading days of raw history
+# needed before any such feature produces non-zero values — so the cutoff
+# must be at least 312 trading days after the raw data start, or a
+# meaningful chunk of post-cutoff rows still come out as zeros (which
+# was happening with the previous 2004-09-11 cutoff: ~50 bars past cutoff
+# still had zeros for ema_20_60_ratio / adx_20_60_ratio / log_return_60,
+# because raw data starts 2003-09-10 and 312 trading days lands in late
+# November 2004).
+#
+# 2004-12-13 (Monday) is ~324 trading days after 2003-09-10 — comfortably
+# past the 60+252 warmup and lands on a clean week start. Costs ~3 months
+# of training data vs. 2004-09-11, negligible against the 22-year window.
+CUTOFF_TIMESTAMP = '2004-12-13 00:00:00+00:00'
 
 # Trading env config
-WINDOW_SIZE = 120
+WINDOW_SIZE = 60
 INITIAL_BALANCE = 10000.0       # Initial trading balance
-MAX_TRADING_UNITS = 30          
+MAX_TRADING_UNITS = 30          # Legacy (minute-level, ticker-specific). Kept for back-compat.
+MAX_POSITION_FRACTION = 1.0     # Max target position as fraction of initial_balance.
+                                # 1.0 = fully invested. Used by DailyEnvironment's
+                                # dollar-exposure action space (ticker-agnostic).
 # Regularly check https://alpaca.markets/support/regulatory-fees for updated fees
 SEC_FEE = 20.60 / 1000000   # per SEC_FEE_PRINCIPAL of principal (sells only) - this fee is rounded up to the nearest penny
 SEC_FEE_PRINCIPAL = 1000000
@@ -331,7 +346,7 @@ SEED = 42
 # Training config
 BATCH_SIZE = 256
 BATCH_SIZE_MULTIDAY_MINUTE = 512 
-NUM_EPISODES = 1000
+NUM_EPISODES = 200
 VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
 
@@ -344,4 +359,4 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Backtest config
 BACKTEST_START_DATE = "2024-01-01"
-BACKTEST_END_DATE = "2025-01-01" 
+BACKTEST_END_DATE = "2025-01-01"
