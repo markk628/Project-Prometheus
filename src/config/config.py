@@ -326,8 +326,23 @@ SEC_FEE_PRINCIPAL = 1000000
 TAF_FEE = 0.000166          # per share (sells only) — this fee is applied on a per-trade basis, rounded up to the nearest penny, 
 TAF_FEE_CAP = 8.30          # and capped at $8.30
 CAT_FEE = 0.0000265         # charged per share
-SPREAD = 0.02               # currently for minute data 0.05 or 0.10 for daily data
-SLIPPAGE = 0.0005           # currently for minute data 0.001 for daily data
+# Execution cost model (applied on every buy and sell inside
+# DailyEnvironment._calculate_execution_price). Values are tuned for
+# daily bars, where executions are assumed to happen at the close with
+# typical daily-frequency slippage rather than at touch.
+#
+# Previous defaults (SPREAD=$0.02, SLIPPAGE=0.0005=5bps) were calibrated
+# for minute-level execution on a liquid single ticker and materially
+# underestimated costs for the 3,341-ticker daily universe. At $100 a
+# share the old model charged ~6 bps per side; the new values charge
+# ~12-15 bps, closer to realistic MOC/VWAP execution across mixed
+# liquidity. If baseline results show cost-sensitivity problems, tune
+# further — especially per-ticker-scaled spread for low-priced names.
+SPREAD = 0.05               # $ per share absolute. ~$0.01 for mega-caps,
+                            #   $0.05 mid-caps, up to $0.20 small-caps.
+                            #   $0.05 is a universe-weighted midpoint.
+SLIPPAGE = 0.001            # Fraction of price (10 bps). Captures
+                            #   execution drift from daily close prints.
 MULTIDAY_MINUTE_EPISODE_DAYS = 5
 
 # Model hyperparameters config

@@ -28,12 +28,36 @@ volume_features = []
 
 NORMALIZATION_WINDOW = 252  # ~1 year of trading days
 
+# Gap threshold for lifecycle-splitting a ticker. A run of consecutive
+# missing trading days of this length or more is treated as a delist/
+# relist boundary (bankruptcy & emergence, exchange transfer with long
+# interruption, symbol reuse after dormancy). Shorter gaps are assumed
+# to be trading halts and are forward-filled by _handle_gaps within the
+# segment. 10 is conservative: legitimate halts on listed US equities
+# essentially never exceed 5 days, while real corporate-action gaps are
+# typically weeks to months. Everything in the 5-10 bucket is logged
+# but NOT split — flag for manual inspection, don't auto-segment.
+GAP_SPLIT_TRADING_DAYS = 10
+GAP_SUSPICIOUS_TRADING_DAYS = 5
+
 # Minimum viable ticker length after feature engineering. A ticker needs
 # at least NORMALIZATION_WINDOW bars of warmup (for rolling z-scores) plus
 # one full training episode (60-day observation window + 252-day episode).
 # Tickers shorter than this produce zero usable training episodes and are
 # skipped at save time to keep the tickers/ directory clean.
 MIN_TICKER_LENGTH = NORMALIZATION_WINDOW + WINDOW_SIZE + 252  # 564 bars
+
+# Critical single-day log-return threshold for excluding tickers with
+# unadjusted-split / data-quality discontinuities. log(2.0) ≈ 0.6931 is
+# a 2x up or 50% down single-day move on split-adjusted prices. After
+# _apply_split_adjustments has done its job, any remaining breach almost
+# always means an unadjusted corporate action that Polygon's splits
+# endpoint doesn't know about (WB.1, WELL, SDRL.1, ICON.1, etc). These
+# produce pathological per-episode returns when sampled in training
+# (the 2088%-style outliers seen in run_1). Same threshold the auditor
+# reports against in _check_price_discontinuities — after this filter
+# runs, the auditor's critical-breach count should be ~0.
+DISCONTINUITY_LOG_THRESHOLD = 0.6931
 
 # ---------------------------------------------------------------------------
 # Sector classification
@@ -165,6 +189,8 @@ def _apply_split_adjustments(
     ticker: str,
     data_dir: Path,
     log: bool = False,
+    source_ticker: Optional[str] = None,
+    segment_end_date: Optional[Any] = None,
 ) -> pl.DataFrame:
     """
     Adjust raw OHLCV bars for historical stock splits.
@@ -186,22 +212,54 @@ def _apply_split_adjustments(
     dollar value of each bar (price × volume) is preserved and relative
     volume signals remain comparable across the split boundary.
 
+    Lifecycle-segment handling
+    --------------------------
+    For symbols that were split into multiple lifecycle segments (e.g.
+    CIT → CIT.1, CIT.2), the splits cache groups all of ``CIT``'s splits
+    under one symbol — including splits that economically belong to the
+    post-BK entity. Without care, ``join_asof`` with ``strategy="forward"``
+    would let bars near the end of the pre-BK segment pick up forward-
+    looking factors from splits that happened after BK to a different
+    entity. That's incorrect: pre-BK shareholders were wiped; post-BK
+    splits didn't affect the pre-BK price series at all.
+
+    The fix is to filter the per-segment splits table to those whose
+    ``execution_date <= segment_end_date`` BEFORE the ``join_asof``.
+    Then ``strategy="forward"`` naturally uses the nearest in-segment
+    split (or gives a null factor → 1.0 for bars after the last in-
+    segment split, which is correct since no further adjustment applies
+    inside this lifetime).
+
     Parameters
     ----------
     df : pl.DataFrame
-        Raw daily bars for a single ticker.
+        Raw daily bars for a single ticker (or ticker segment).
     ticker : str
-        Ticker symbol — used to filter the splits cache.
+        Identifier used for logging only. Typically the segment name
+        (e.g. ``CIT.1``) for clarity in worker logs.
     data_dir : Path
         Root data directory.
     log : bool
         If True, print progress messages.
+    source_ticker : Optional[str]
+        The original Polygon symbol to filter the splits cache by.
+        Defaults to ``ticker`` when not provided — that keeps the
+        single-segment case (AAPL, MSFT, …) working unchanged. For
+        lifecycle-split segments the caller passes the source symbol
+        (e.g. ``CIT``).
+    segment_end_date : Optional[date]
+        If provided, splits with ``execution_date > segment_end_date``
+        are excluded from the adjustment. Only meaningful for lifecycle-
+        split segments where the raw symbol has splits that belong to
+        a later lifetime. For single-segment tickers this can safely
+        be left ``None``.
 
     Returns
     -------
     pl.DataFrame
         DataFrame with split-adjusted price and volume columns.
     """
+    lookup_ticker = source_ticker if source_ticker is not None else ticker
     splits_path = data_dir / "raw" / "splits" / "splits.parquet"
 
     if not splits_path.exists():
@@ -211,12 +269,18 @@ def _apply_split_adjustments(
 
     all_splits = pl.read_parquet(splits_path)
 
-    # Filter to this ticker's real splits (exclude placeholder rows)
-    splits = all_splits.filter(
-        (pl.col("ticker") == ticker) &
-        (pl.col("adjustment_type") != "none") &
-        (pl.col("execution_date").is_not_null())
-    ).sort("execution_date")
+    # Filter to this ticker's real splits (exclude placeholder rows).
+    # Lookup is by source symbol, but log messages use the segment name
+    # to make worker output self-describing.
+    splits_filter = (
+        (pl.col("ticker") == lookup_ticker)
+        & (pl.col("adjustment_type") != "none")
+        & (pl.col("execution_date").is_not_null())
+    )
+    if segment_end_date is not None:
+        splits_filter = splits_filter & (pl.col("execution_date") <= segment_end_date)
+
+    splits = all_splits.filter(splits_filter).sort("execution_date")
 
     if splits.is_empty():
         if log:
@@ -253,9 +317,11 @@ def _process_ticker(
     ticker_df: pl.DataFrame,
     data_dir: Path,
     log: bool,
+    source_ticker: Optional[str] = None,
+    segment_end_date: Optional[Any] = None,
 ) -> str:
     """
-    Full feature-engineering pipeline for one ticker.
+    Full feature-engineering pipeline for one ticker (or lifecycle segment).
     Runs in a worker process — no shared state.
 
     Normalization happens here on the full timeline (no trimming, no splitting)
@@ -266,11 +332,49 @@ def _process_ticker(
     after every normalization pass (per-ticker rolling z-score, cross-sectional
     z-score, breadth, RS) has had the full history available.
 
+    :param ticker: Identity of this series in the processed output (segment
+        name for split tickers, plain symbol otherwise). Used for log output
+        and for the column prefix on the saved parquet.
+    :param source_ticker: The underlying Polygon symbol for API-keyed lookups
+        (splits, and later sectors). Defaults to ``ticker`` so single-segment
+        tickers work unchanged.
+    :param segment_end_date: For lifecycle-split segments, the last date
+        belonging to this segment. Passed to _apply_split_adjustments so
+        splits belonging to a later segment (e.g. post-bankruptcy reverse
+        splits of the new-entity's shares) don't leak into this segment's
+        adjustment factors. ``None`` for single-segment tickers.
+
     Returns the ticker name on success or an error string on failure.
     """
     try:
-        df = _apply_split_adjustments(ticker_df, ticker, data_dir, log)
+        df = _apply_split_adjustments(
+            ticker_df,
+            ticker,
+            data_dir,
+            log,
+            source_ticker=source_ticker,
+            segment_end_date=segment_end_date,
+        )
         df = _handle_gaps(df, log)
+
+        # Critical-discontinuity gate. Computed on post-split, post-gap
+        # closes — i.e. the actual continuous price series this segment
+        # would feed to training. Any single-day |log_return| >= the
+        # threshold (default ≈ 100%) almost certainly indicates an
+        # unadjusted corporate action Polygon doesn't have records for.
+        # Bail out before paying for VWAP / candlestick / volatility /
+        # trend / volume / normalization on a ticker that won't survive
+        # to training anyway.
+        closes = df["close"].to_numpy()
+        if len(closes) > 1:
+            log_rets = np.diff(np.log(closes))
+            max_abs_log_ret = float(np.max(np.abs(log_rets)))
+            if max_abs_log_ret >= DISCONTINUITY_LOG_THRESHOLD:
+                return (
+                    f"SKIP:{ticker}:discontinuity (max |log_ret|="
+                    f"{max_abs_log_ret:.4f} ≥ {DISCONTINUITY_LOG_THRESHOLD:.4f})"
+                )
+
         df = _calculate_vwap(df, log)
         df = _add_candlestick_features(df, log)
         df = _add_temporal_patterns(df, log)
@@ -724,6 +828,7 @@ class DataFeatureEngineer:
         max_workers: Optional[int] = None,   # None → os.cpu_count()
         min_dollar_volume: float = 10_000_000,  # $10M avg daily dollar volume
         min_history_days: int = 504,             # ~2 years of trading days
+        min_median_price: float = 5.0,           # penny-stock floor (lifetime-median close)
         api_delay: float = 0.15,                 # seconds between Polygon API calls
     ):
         self.data_dir         = data_dir
@@ -738,7 +843,22 @@ class DataFeatureEngineer:
         self.max_workers      = max_workers
         self.min_dollar_volume = min_dollar_volume
         self.min_history_days  = min_history_days
+        self.min_median_price  = min_median_price
         self.api_delay         = api_delay
+
+        # Populated by _split_lifecycle_segments: segment-name -> source
+        # Polygon symbol. For single-segment tickers the mapping is the
+        # identity (AAPL -> AAPL). For lifecycle-split symbols (CIT,
+        # etc.) multiple segment names resolve to the same source symbol.
+        # Used by _apply_split_adjustments and _fetch_sector_labels to
+        # key into source-symbol-indexed caches.
+        self.segment_to_source: Dict[str, str] = {}
+
+        # Populated by _split_lifecycle_segments for multi-segment tickers
+        # only. Maps segment name -> last calendar date belonging to that
+        # segment, used by _apply_split_adjustments to exclude splits
+        # belonging to a later lifetime.
+        self.segment_end_dates: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Data Loading
@@ -778,6 +898,250 @@ class DataFeatureEngineer:
         return all_data
 
     # ------------------------------------------------------------------
+    # Lifecycle segmentation
+    # ------------------------------------------------------------------
+
+    def _split_lifecycle_segments(self, all_data: pl.DataFrame) -> pl.DataFrame:
+        """
+        Detect multi-day trading gaps that indicate a delist / relist
+        lifecycle boundary and rewrite the ``ticker`` column so each
+        continuous lifetime becomes its own "ticker" for the rest of
+        the pipeline.
+
+        Motivation
+        ----------
+        A symbol that trades, stops for months (bankruptcy + emergence,
+        exchange transfer with long interruption, symbol reuse by an
+        unrelated entity), and then resumes is not a single continuous
+        price series. Treating it as one produces:
+          * a forward-filled flat-line across the gap in ``_handle_gaps``
+          * a spurious single-day "jump" on the relist day
+          * blended cross-lifetime liquidity stats that can let one
+            lifetime drag the other past or fail the filter
+
+        By splitting here — before liquidity filtering, splits lookup,
+        or feature engineering — every downstream step sees each
+        lifetime as first-class, and the filled-in shared state
+        ``self.segment_to_source`` routes source-symbol-keyed API
+        lookups (splits, sectors) back to the original Polygon symbol.
+
+        Detection
+        ---------
+        A gap is the number of **trading days** between two consecutive
+        bars for the same ticker, measured against the NYSE calendar
+        spanning the ticker's observed range. Gaps of
+        ``GAP_SPLIT_TRADING_DAYS`` (10) or more trigger a segmentation;
+        gaps in [5, 10) are logged as "suspicious" for manual review
+        but NOT split. Shorter gaps are left for ``_handle_gaps`` to
+        forward-fill within the segment, which is the defensible use
+        of that function.
+
+        Naming
+        ------
+        Multi-segment tickers get ``{ticker}.{N}`` (1-indexed, e.g.
+        ``CIT.1``, ``CIT.2``). Single-segment tickers keep their raw
+        symbol. This leaves the vast majority of the universe (AAPL,
+        MSFT, …) unchanged, and the ``.`` suffix keeps the underscore-
+        delimited column-parsing in the unified parquet / trainer
+        working without modification.
+
+        Returns
+        -------
+        pl.DataFrame
+            The input frame with its ``ticker`` column rewritten to
+            segment names. Row count is unchanged — splitting is a
+            pure relabel.
+        """
+        if self.logger:
+            self.logger.info(
+                f"Detecting lifecycle segments "
+                f"(split threshold: {GAP_SPLIT_TRADING_DAYS} trading days, "
+                f"suspicious: {GAP_SUSPICIOUS_TRADING_DAYS}-{GAP_SPLIT_TRADING_DAYS-1})..."
+            )
+
+        # Build the NYSE trading-day calendar once, covering the full
+        # span of all_data. Converting a timestamp to "trading-day index"
+        # via a join lets us compute gaps in trading days (not calendar
+        # days) without per-ticker calendar rebuilds.
+        global_start = all_data["timestamp"].min().date()
+        global_end   = all_data["timestamp"].max().date()
+        nyse_days = _build_nyse_valid_days(global_start, global_end).with_row_index("trading_day_idx")
+
+        # Attach the trading-day index to every bar. Join by date to
+        # match _handle_gaps' convention.
+        with_idx = (
+            all_data
+            .with_columns(pl.col("timestamp").dt.date().alias("date"))
+            .join(nyse_days, on="date", how="left")
+            .sort(["ticker", "trading_day_idx"])
+        )
+
+        # Per-ticker gap = (this bar's trading-day index) - (previous
+        # bar's trading-day index) - 1. Values >= 1 indicate missing
+        # trading days between consecutive observed bars.
+        with_gaps = with_idx.with_columns(
+            (
+                pl.col("trading_day_idx")
+                - pl.col("trading_day_idx").shift(1).over("ticker")
+                - 1
+            ).alias("gap_days")
+        )
+
+        # Count suspicious-bucket gaps (for logging only)
+        suspicious_count = with_gaps.filter(
+            (pl.col("gap_days") >= GAP_SUSPICIOUS_TRADING_DAYS)
+            & (pl.col("gap_days") < GAP_SPLIT_TRADING_DAYS)
+        ).height
+
+        if suspicious_count > 0 and self.logger:
+            # Per-ticker rollup of suspicious gaps so the analyst can
+            # eyeball whether the 5-10 band is empty or noisy.
+            suspicious_rollup = (
+                with_gaps
+                .filter(
+                    (pl.col("gap_days") >= GAP_SUSPICIOUS_TRADING_DAYS)
+                    & (pl.col("gap_days") < GAP_SPLIT_TRADING_DAYS)
+                )
+                .group_by("ticker")
+                .agg([
+                    pl.len().alias("n_suspicious_gaps"),
+                    pl.col("gap_days").max().alias("max_gap"),
+                ])
+                .sort("n_suspicious_gaps", descending=True)
+            )
+            self.logger.warning(
+                f"Found {suspicious_count} 'suspicious' gap(s) in "
+                f"[{GAP_SUSPICIOUS_TRADING_DAYS}, {GAP_SPLIT_TRADING_DAYS}) "
+                f"trading-day band across {suspicious_rollup.height} tickers "
+                f"— NOT splitting these (inspect manually if unexpected):"
+            )
+            for row in suspicious_rollup.head(20).iter_rows(named=True):
+                self.logger.warning(
+                    f"  {row['ticker']:<10} | "
+                    f"{row['n_suspicious_gaps']} gap(s), max {row['max_gap']}d"
+                )
+
+        # Mark segment-start rows: a bar starts a new segment if it's
+        # either the first bar for its ticker OR follows a split-worthy
+        # gap. `cum_sum().over("ticker")` then assigns a monotonically
+        # increasing segment index within each ticker.
+        with_segs = with_gaps.with_columns(
+            (
+                pl.col("gap_days").is_null()                          # first bar
+                | (pl.col("gap_days") >= GAP_SPLIT_TRADING_DAYS)      # post-gap
+            )
+            .cast(pl.Int64)
+            .cum_sum()
+            .over("ticker")
+            .alias("segment_idx")
+        )
+
+        # Build one row per (ticker, segment_idx) with first/last date.
+        # Single-segment tickers get segment_idx == 1. Multi-segment
+        # tickers get 1, 2, 3...
+        segment_ranges = (
+            with_segs
+            .group_by(["ticker", "segment_idx"])
+            .agg([
+                pl.col("date").min().alias("seg_start"),
+                pl.col("date").max().alias("seg_end"),
+                pl.len().alias("n_bars"),
+            ])
+            .sort(["ticker", "segment_idx"])
+        )
+
+        # Also compute how many segments each ticker has, so we only
+        # rename tickers that actually got split. Most tickers stay
+        # single-segment and keep their raw symbol.
+        segment_counts = (
+            segment_ranges
+            .group_by("ticker")
+            .agg(pl.len().alias("n_segments"))
+        )
+
+        segment_ranges = segment_ranges.join(segment_counts, on="ticker", how="left")
+
+        # Derive the segment name per row.
+        # Single-segment (n_segments == 1): keep raw ticker symbol.
+        # Multi-segment:                     {ticker}.{segment_idx}
+        #
+        # The .N suffix (e.g. CIT.1, CIT.2) is chosen over a date-range
+        # suffix because the unified parquet flattens everything to
+        # {ticker}_{feature} columns, and downstream code in the trainer
+        # parses the ticker via a single split on "_". A date-based name
+        # like CIT_2003_2009 would break that parse (every segment would
+        # alias back to "CIT" with a feature name of "2003_2009_<...>").
+        # The "." suffix can't collide with Polygon class-share symbols
+        # like BRK.B because those are source symbols loaded before
+        # segmentation, and "." is always followed by an integer here.
+        segment_ranges = segment_ranges.with_columns(
+            pl.when(pl.col("n_segments") == 1)
+            .then(pl.col("ticker"))
+            .otherwise(
+                pl.col("ticker") + pl.lit(".") + pl.col("segment_idx").cast(pl.Utf8)
+            )
+            .alias("segment_name")
+        )
+
+        # Log the split decisions for visibility.
+        split_tickers = segment_ranges.filter(pl.col("n_segments") > 1)
+        if split_tickers.height > 0 and self.logger:
+            # Unique source symbols that got split, with their segments.
+            source_symbols = split_tickers["ticker"].unique().to_list()
+            self.logger.warning(
+                f"Lifecycle-splitting {len(source_symbols)} ticker(s) into "
+                f"{split_tickers.height} segment(s) total:"
+            )
+            for src in sorted(source_symbols):
+                segs = split_tickers.filter(pl.col("ticker") == src).sort("segment_idx")
+                self.logger.warning(f"  {src}:")
+                for row in segs.iter_rows(named=True):
+                    self.logger.warning(
+                        f"    {row['segment_name']:<20} "
+                        f"{row['seg_start']} → {row['seg_end']} "
+                        f"({row['n_bars']:,} bars)"
+                    )
+        elif self.logger:
+            self.logger.info("No tickers required lifecycle splitting.")
+
+        # Build the segment_to_source mapping (used by splits / sector
+        # lookups downstream).
+        self.segment_to_source = {
+            row["segment_name"]: row["ticker"]
+            for row in segment_ranges.iter_rows(named=True)
+        }
+
+        # Build the segment_end_date mapping. Only populated for
+        # multi-segment tickers — single-segment tickers leave the mapping
+        # empty so _apply_split_adjustments receives segment_end_date=None
+        # and behaves identically to the pre-segmentation code path. For
+        # multi-segment tickers, the end date is used to filter out splits
+        # that belong to a LATER segment (economically a different entity)
+        # before the join_asof.
+        self.segment_end_dates: Dict[str, Any] = {
+            row["segment_name"]: row["seg_end"]
+            for row in segment_ranges.iter_rows(named=True)
+            if row["n_segments"] > 1
+        }
+
+        # Attach segment_name back onto the data frame. Join on
+        # (ticker, segment_idx) — which is the natural key — then
+        # replace the ticker column.
+        relabelled = (
+            with_segs
+            .join(
+                segment_ranges.select(["ticker", "segment_idx", "segment_name"]),
+                on=["ticker", "segment_idx"],
+                how="left",
+            )
+            .drop(["ticker", "segment_idx", "gap_days", "trading_day_idx", "date"])
+            .rename({"segment_name": "ticker"})
+            .sort(["ticker", "timestamp"])
+        )
+
+        return relabelled
+
+    # ------------------------------------------------------------------
     # Ticker filtering
     # ------------------------------------------------------------------
 
@@ -786,17 +1150,31 @@ class DataFeatureEngineer:
         Filter tickers by:
           1. Average daily dollar volume >= min_dollar_volume
           2. Total trading days >= min_history_days
+          3. Lifetime-median close price >= min_median_price
+
+        The price floor is a separate gate from dollar volume because
+        the two measure different things: dollar volume is "is there
+        enough trading activity to fill orders?" while the price floor
+        is "is the per-share price meaningful enough that fixed-tick
+        frictions don't dominate?". A penny stock pumping at $0.50
+        on 50M shares/day passes the $10M dollar-volume floor while
+        still being uninvestable — the env's spread/slippage assumptions
+        (calibrated for liquid mid/large-cap names) silently break down
+        below ~$5/share. Median (not mean / not min) is robust to brief
+        pumps and brief dips while reflecting where the ticker "lived"
+        most of its history.
 
         Operates on an in-memory DataFrame (already loaded by the caller)
         rather than scanning CSV files from disk. Regime tickers from
-        self.tickers are always included regardless of liquidity.
+        self.tickers are always included regardless of any filter.
 
         Returns a sorted list of ticker symbols that pass all filters.
         """
         if self.logger:
             self.logger.info(
                 f"Filtering tickers: min_dollar_volume=${self.min_dollar_volume:,.0f}, "
-                f"min_history_days={self.min_history_days}..."
+                f"min_history_days={self.min_history_days}, "
+                f"min_median_price=${self.min_median_price:.2f}..."
             )
 
         ticker_stats = (
@@ -807,6 +1185,7 @@ class DataFeatureEngineer:
             .group_by("ticker")
             .agg([
                 pl.col("dollar_volume").mean().alias("avg_dollar_volume"),
+                pl.col("close").median().alias("median_close"),
                 pl.len().alias("trading_days"),
             ])
         )
@@ -814,15 +1193,30 @@ class DataFeatureEngineer:
         # Apply thresholds
         qualified = ticker_stats.filter(
             (pl.col("avg_dollar_volume") >= self.min_dollar_volume) &
-            (pl.col("trading_days") >= self.min_history_days)
+            (pl.col("trading_days")      >= self.min_history_days) &
+            (pl.col("median_close")      >= self.min_median_price)
         )
 
         filtered_tickers = sorted(qualified["ticker"].to_list())
 
         if self.logger:
+            # Per-reason breakdown so the next preprocessing run reports
+            # which gate is dropping the most tickers — useful when
+            # tuning thresholds.
+            n_total = ticker_stats.height
+            n_pass_volume = ticker_stats.filter(
+                pl.col("avg_dollar_volume") >= self.min_dollar_volume
+            ).height
+            n_pass_volume_history = ticker_stats.filter(
+                (pl.col("avg_dollar_volume") >= self.min_dollar_volume) &
+                (pl.col("trading_days") >= self.min_history_days)
+            ).height
+            n_pass_all = qualified.height
             self.logger.info(
-                f"Liquidity filter: {len(ticker_stats)} total tickers → "
-                f"{len(qualified)} passed thresholds"
+                f"Liquidity filter: {n_total} total → "
+                f"{n_pass_volume} passed dollar-volume → "
+                f"{n_pass_volume_history} also passed history → "
+                f"{n_pass_all} also passed price floor"
             )
 
         # Ensure regime tickers are always included even if they don't pass
@@ -839,7 +1233,7 @@ class DataFeatureEngineer:
                 f"({len(filtered_tickers) - len(regime_tickers)} tradable + "
                 f"{len(regime_tickers)} regime)"
             )
-        
+
         return filtered_tickers
 
     # ------------------------------------------------------------------
@@ -2266,17 +2660,46 @@ class DataFeatureEngineer:
         # happen AFTER all regime features are computed so that breadth,
         # VIX term structure, and RS vs SPY calculations can correctly
         # ignore missing tickers via null-aware aggregations.
+        #
+        # IMPORTANT — _close columns are EXCLUDED from the 0-fill. A null
+        # close means "the ticker was not trading on this day" (pre-IPO,
+        # post-delisting, between lifecycle segments).
+        #
+        # Note: the trainer's ticker-loading already did `prices > 0` to
+        # compute first_valid_idx / last_valid_idx, so the old 0-fill was
+        # being implicitly masked at episode-sampling time. This change
+        # isn't what fixes the 2088%-return pathology (that's the
+        # lifecycle-segmentation fix in _split_lifecycle_segments). But
+        # the old behavior quietly conflated "no data" with "traded at
+        # exactly $0.00" and relied on every downstream consumer to
+        # defensively filter. Making null mean "not tradable" and reserving
+        # 0.0 for actual-zero readings is the honest encoding. Feature
+        # columns are still filled because features are z-scored and 0.0
+        # is a semantically valid "neutral reading" there.
         # ------------------------------------------------------------------
 
         if self.logger:
             null_count = stacked.select(pl.all().null_count()).sum_horizontal().item()
             self.logger.info(f"  Filling {null_count:,} null values from shorter-history tickers...")
 
-        # Only fill numeric columns — leave timestamp untouched
-        numeric_cols = [c for c in stacked.columns if stacked[c].dtype in (pl.Float64, pl.Float32, pl.Int64, pl.Int32)]
+        # Fill numeric feature columns with 0.0, but leave timestamp and
+        # every {ticker}_close column untouched (null == "not tradable").
+        close_cols = {c for c in stacked.columns if c.endswith("_close")}
+        numeric_cols = [
+            c for c in stacked.columns
+            if c not in close_cols
+            and stacked[c].dtype in (pl.Float64, pl.Float32, pl.Int64, pl.Int32)
+        ]
         stacked = stacked.with_columns([
             pl.col(c).fill_null(0.0).fill_nan(0.0) for c in numeric_cols
         ])
+
+        if self.logger:
+            remaining_nulls = stacked.select(pl.all().null_count()).sum_horizontal().item()
+            self.logger.info(
+                f"  After fill: {remaining_nulls:,} nulls remaining "
+                f"(expected — these are non-tradable days in _close columns)"
+            )
 
         # ------------------------------------------------------------------
         # Phase 3: trim regime-ticker columns, warmup rows, and write output
@@ -2375,19 +2798,38 @@ class DataFeatureEngineer:
         all_data = self._load_all_data()
 
         # ==================================================================
+        # Step 1.5: Detect lifecycle segments and relabel the ticker column
+        # ==================================================================
+        all_data = self._split_lifecycle_segments(all_data)
+
+        # ==================================================================
         # Step 2: Filter tickers by liquidity
         # ==================================================================
         filtered_tickers = self._filter_tickers_by_liquidity(all_data)
 
+        # Segments are what downstream feature engineering and the
+        # unified-frame layout operate on, but Polygon API calls
+        # (sectors, ticker type, events, splits) are keyed by source
+        # symbol. Collapse segment names back to their source symbols
+        # for any API-hitting step so we don't double-fetch CIT twice.
+        filtered_source_tickers = sorted({
+            self.segment_to_source.get(t, t) for t in filtered_tickers
+        })
+
         # ==================================================================
         # Step 3: Fetch sector labels from Polygon API (cached to parquet)
         # ==================================================================
-        self._fetch_sector_labels(filtered_tickers)
+        self._fetch_sector_labels(filtered_source_tickers)
 
         # ==================================================================
         # Step 4: Filter by ticker type (keep CS/ADRC/OS only)
         # ==================================================================
-        filtered_tickers = self._filter_by_ticker_details(filtered_tickers)
+        kept_source_tickers = set(self._filter_by_ticker_details(filtered_source_tickers))
+        # Project the type-filter decision back onto segment names.
+        filtered_tickers = [
+            seg for seg in filtered_tickers
+            if self.segment_to_source.get(seg, seg) in kept_source_tickers
+        ]
 
         # ==================================================================
         # Step 5: Fetch ticker events and build initial aliases
@@ -2396,7 +2838,11 @@ class DataFeatureEngineer:
         # knows which historical symbols to also fetch (e.g. FB for META).
         # Suspects can't be detected yet because splits.parquet doesn't exist.
         # ==================================================================
-        self._fetch_ticker_events(filtered_tickers)
+        # Re-derive source symbols after the ticker-type filter dropped some.
+        filtered_source_tickers = sorted({
+            self.segment_to_source.get(t, t) for t in filtered_tickers
+        })
+        self._fetch_ticker_events(filtered_source_tickers)
         self.ticker_aliases = self._build_ticker_aliases()
 
         # ==================================================================
@@ -2408,18 +2854,37 @@ class DataFeatureEngineer:
         # previous ticker has splits recorded AFTER the rename date
         # (indicating ticker reuse) are dropped from the final mapping.
         # ==================================================================
-        self._fetch_splits(filtered_tickers)
+        self._fetch_splits(filtered_source_tickers)
 
         # ==================================================================
         # Step 7: Partition by ticker, resolve aliases, dispatch to workers
         # ==================================================================
 
-        # Also include alias symbols (e.g. FB) so they're available for stitching
+        # Also include alias symbols (e.g. FB) so they're available for stitching.
+        #
+        # Aliases are defined in source-symbol space (FB → META). Splitting
+        # runs on all_data BEFORE this block, so every row in all_data has
+        # a segment name in its "ticker" column. For an alias to be
+        # findable here, the previous-symbol's lifetime must produce a
+        # single segment (in which case the segment name equals the raw
+        # symbol). Multi-segment alias symbols would break this assumption
+        # — guard it explicitly so we fail loudly if it ever happens.
         alias_symbols = set()
         for alias in self.ticker_aliases:
             if alias["current_ticker"] in filtered_tickers:
                 for t in alias["previous_tickers"]:
-                    alias_symbols.add(t["symbol"])
+                    prev_symbol = t["symbol"]
+                    source_of_prev = self.segment_to_source.get(prev_symbol)
+                    if source_of_prev is not None and source_of_prev != prev_symbol:
+                        raise RuntimeError(
+                            f"Alias previous-symbol {prev_symbol!r} is itself a "
+                            f"lifecycle segment (source={source_of_prev!r}). "
+                            f"_resolve_aliases looks up raw symbols, not segment "
+                            f"names — this case isn't supported. If this ever "
+                            f"fires, either the alias or the split threshold "
+                            f"needs re-thinking."
+                        )
+                    alias_symbols.add(prev_symbol)
 
         symbols_needed = set(filtered_tickers) | alias_symbols
 
@@ -2461,6 +2926,9 @@ class DataFeatureEngineer:
 
         total = len(ticker_list)
         done = 0
+        n_errors = 0
+        skip_counts: Dict[str, int] = {}
+        skip_examples: Dict[str, List[str]] = {}
 
         for batch_num, batch in enumerate(batches, 1):
             if self.logger:
@@ -2476,10 +2944,12 @@ class DataFeatureEngineer:
                         continue
                     fut = pool.submit(
                         _process_ticker,
-                        ticker,
+                        ticker,                                              # segment name (output identity)
                         ticker_dfs[ticker],
                         self.data_dir,
                         False,
+                        self.segment_to_source.get(ticker, ticker),          # source symbol for splits lookup
+                        self.segment_end_dates.get(ticker),                  # None for single-segment tickers
                     )
                     futures[fut] = ticker
 
@@ -2489,10 +2959,16 @@ class DataFeatureEngineer:
                         _, failed_ticker, msg = result.split(":", 2)
                         if self.logger:
                             self.logger.error(f"[{failed_ticker}] pipeline failed: {msg}")
+                        n_errors += 1
                     elif result.startswith("SKIP:"):
                         _, skipped_ticker, reason = result.split(":", 2)
                         if self.logger:
                             self.logger.info(f"[{skipped_ticker}] skipped ({reason})")
+                        # Categorize for end-of-run summary. The first
+                        # word of the reason names the bucket.
+                        bucket = reason.split(None, 1)[0].rstrip(":")
+                        skip_counts[bucket] = skip_counts.get(bucket, 0) + 1
+                        skip_examples.setdefault(bucket, []).append(skipped_ticker)
                     else:
                         done += 1
                         if self.logger:
@@ -2503,6 +2979,19 @@ class DataFeatureEngineer:
                 ticker_dfs.pop(ticker, None)
 
         del ticker_dfs
+
+        # End-of-dispatch summary so the per-reason skip counts are
+        # findable without grepping the per-ticker log lines.
+        if self.logger:
+            self.logger.info(
+                f"Per-ticker pipeline complete: {done} succeeded, "
+                f"{sum(skip_counts.values())} skipped, {n_errors} errors"
+            )
+            for bucket, count in sorted(skip_counts.items(), key=lambda kv: -kv[1]):
+                examples = skip_examples.get(bucket, [])
+                sample = ", ".join(sorted(examples)[:10])
+                suffix = "..." if len(examples) > 10 else ""
+                self.logger.info(f"  Skipped [{bucket}]: {count}  (sample: {sample}{suffix})")
 
         # ==================================================================
         # Step 8: Cross-sectional normalization

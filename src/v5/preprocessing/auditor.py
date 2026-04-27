@@ -3,7 +3,7 @@ import numpy as np
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from src.config.config import DATA_DIR
 from src.utils.logger import Logger
@@ -140,8 +140,20 @@ class DataAuditor:
             pl.col(c).is_infinite().sum().alias(c) for c in check_cols
         ]).row(0, named=True)
 
+        # _close columns intentionally hold null in non-tradable rows
+        # (pre-IPO, post-delisting, between lifecycle segments). The
+        # survivorship check already reports those. Filter them out of
+        # the null warning so the report shows only *unexpected* nulls
+        # — i.e. closes with nulls in the interior of their valid range,
+        # which would indicate a real data-quality issue.
+        close_cols = [c for c in df.columns if c.endswith("_close")]
+        benign_close_nulls = self._classify_close_nulls(df, close_cols)
+        n_benign = sum(1 for ok in benign_close_nulls.values() if ok)
+
         null_cols = [
-            f"{c} ({n:,})" for c, n in null_counts.items() if n and n > 0
+            f"{c} ({n:,})"
+            for c, n in null_counts.items()
+            if n and n > 0 and not benign_close_nulls.get(c, False)
         ]
         nan_cols = [
             f"{c} ({n:,})" for c, n in nan_counts.items() if n and n > 0
@@ -150,9 +162,62 @@ class DataAuditor:
             f"{c} ({n:,})" for c, n in inf_counts.items() if n and n > 0
         ]
 
+        if n_benign > 0:
+            self.logger.info(
+                f"  Suppressed {n_benign} _close column(s) whose nulls are "
+                f"all pre-IPO/post-delisting (covered by survivorship check)."
+            )
+
         self._log_list("Null", null_cols)
         self._log_list("NaN", nan_cols)
         self._log_list("Inf", inf_cols)
+
+    def _classify_close_nulls(
+        self, df: pl.DataFrame, close_cols: List[str]
+    ) -> Dict[str, bool]:
+        """
+        For each ``{ticker}_close`` column, decide whether its nulls are
+        "benign" — consist solely of a contiguous prefix (pre-IPO) and/or
+        a contiguous suffix (post-delisting). Interior nulls indicate a
+        real data-quality issue and should still be flagged.
+
+        Returns a dict mapping column -> True (benign, suppress) /
+        False (interior nulls present, keep flagging).
+
+        Implementation: a column with only edge nulls satisfies
+        ``total_nulls == leading_nulls + trailing_nulls``. Computed for
+        every close column in a single Polars pass via cumulative-min
+        over the ``is_null`` mask (which stays 1 only while inside an
+        unbroken null run from the edge).
+        """
+        if not close_cols:
+            return {}
+
+        n_rows = df.height
+        exprs = []
+        for c in close_cols:
+            is_null = pl.col(c).is_null().cast(pl.Int8)
+            exprs.append(is_null.sum().alias(f"{c}__total"))
+            exprs.append(is_null.cum_min().sum().alias(f"{c}__lead"))
+            exprs.append(is_null.cum_min(reverse=True).sum().alias(f"{c}__trail"))
+
+        row = df.select(exprs).row(0, named=True)
+
+        result: Dict[str, bool] = {}
+        for c in close_cols:
+            total = row[f"{c}__total"] or 0
+            if total == 0:
+                # No nulls at all — already absent from the warning list.
+                result[c] = True
+                continue
+            lead  = row[f"{c}__lead"] or 0
+            trail = row[f"{c}__trail"] or 0
+            # Entirely-null column: don't suppress, that's a real bug.
+            if lead >= n_rows:
+                result[c] = False
+                continue
+            result[c] = (total == lead + trail)
+        return result
 
     # =========================
     # Core Statistics
@@ -595,6 +660,157 @@ class DataAuditor:
             self.logger.info(f"  {f1} <-> {f2} | corr={val:.4f}")
 
     # =========================
+    # Per-ticker price discontinuities
+    # =========================
+    def _check_price_discontinuities(
+        self,
+        df: pl.DataFrame,
+        critical_threshold: float = 0.6931,   # log(2.0)  — 2x up or 50% down
+        suspicious_threshold: float = 0.4055, # log(1.5)  — 50% up or 33% down
+        top_n: int = 30,
+    ):
+        """
+        Scan every ticker's {ticker}_close series for single-day moves large
+        enough to suggest a data artifact rather than an organic price move.
+
+        Typical causes of critical breaches:
+          - Unadjusted forward splits (a 2:1 shows as ~50% drop)
+          - Unadjusted reverse splits (a 1:10 shows as ~10x jump)
+          - Delisting-day garbage prices
+          - Post-bankruptcy relist with the same ticker
+          - Bad ticks / data entry errors in the source
+          - Symbol reuse across merged/acquired entities
+
+        Uses log returns so that 2x up and 50% down have equal magnitude.
+        Legitimate earnings moves (≈15–40%) on small-caps will show up as
+        "suspicious" but not "critical" — the critical bucket is the one
+        to manually inspect against known corporate-action history before
+        training on the affected tickers.
+        """
+        self.logger.info("Checking for per-ticker price discontinuities...")
+
+        close_cols = [c for c in df.columns if c.endswith("_close")]
+        if not close_cols or "timestamp" not in df.columns:
+            self.logger.warning(
+                "Price discontinuity check: missing close columns or timestamp — skipping"
+            )
+            return
+
+        # Unpivot all close columns to long form, drop nulls/zeros, then
+        # compute within-ticker day-to-day log returns in a single lazy
+        # pass. `shift().over("ticker")` ensures the lag is per-ticker so
+        # one ticker's first valid day never references another's last.
+        long = (
+            df.lazy()
+            .select(["timestamp"] + close_cols)
+            .unpivot(
+                index="timestamp",
+                on=close_cols,
+                variable_name="close_col",
+                value_name="close",
+            )
+            .with_columns(
+                pl.col("close_col").str.replace(r"_close$", "").alias("ticker")
+            )
+            .drop("close_col")
+            .filter(pl.col("close").is_not_null() & (pl.col("close") > 0))
+            .sort(["ticker", "timestamp"])
+            .with_columns(
+                pl.col("close").shift(1).over("ticker").alias("prev_close")
+            )
+            .filter(pl.col("prev_close").is_not_null() & (pl.col("prev_close") > 0))
+            .with_columns(
+                (pl.col("close") / pl.col("prev_close")).log().alias("log_ret")
+            )
+            .filter(pl.col("log_ret").abs() >= suspicious_threshold)
+            .with_columns(
+                ((pl.col("close") / pl.col("prev_close")) - 1.0).alias("pct_move")
+            )
+            .select(["ticker", "timestamp", "prev_close", "close", "pct_move", "log_ret"])
+        )
+        breaches = long.collect()
+
+        n_breach_total = breaches.height
+        n_critical = breaches.filter(
+            pl.col("log_ret").abs() >= critical_threshold
+        ).height
+
+        self.logger.info(
+            f"Scanned {len(close_cols)} tickers. "
+            f"Suspicious day-moves (|log_ret| ≥ {suspicious_threshold:.4f}, "
+            f"≈±{np.expm1(suspicious_threshold)*100:.0f}%): {n_breach_total:,}"
+        )
+        self.logger.info(
+            f"  Of which CRITICAL (|log_ret| ≥ {critical_threshold:.4f}, "
+            f"≈±{np.expm1(critical_threshold)*100:.0f}%): {n_critical:,}"
+        )
+
+        if n_breach_total == 0:
+            self.logger.info("Price discontinuities: OK")
+            return
+
+        # Per-ticker rollup: how many breaches, how many critical, biggest move
+        per_ticker = (
+            breaches
+            .group_by("ticker")
+            .agg([
+                pl.len().alias("n_suspicious"),
+                (pl.col("log_ret").abs() >= critical_threshold)
+                    .sum()
+                    .alias("n_critical"),
+                pl.col("pct_move").abs().max().alias("max_abs_pct"),
+            ])
+            .sort(["n_critical", "n_suspicious", "max_abs_pct"], descending=True)
+        )
+
+        worst_tickers = per_ticker.filter(pl.col("n_critical") > 0).head(top_n)
+        if worst_tickers.height > 0:
+            self.logger.warning(
+                f"Top {worst_tickers.height} tickers by CRITICAL breach count "
+                f"(inspect corporate-action history before training):"
+            )
+            for row in worst_tickers.iter_rows(named=True):
+                self.logger.warning(
+                    f"  {row['ticker']:<10} | critical: {row['n_critical']:<3} | "
+                    f"suspicious: {row['n_suspicious']:<4} | "
+                    f"max single-day: {row['max_abs_pct']:+.1%}"
+                )
+
+        # Top-N worst individual events globally — the single most extreme
+        # day-moves across the whole universe, with ticker + date + prices.
+        top_events = (
+            breaches
+            .with_columns(pl.col("log_ret").abs().alias("abs_log_ret"))
+            .sort("abs_log_ret", descending=True)
+            .head(top_n)
+        )
+        if top_events.height > 0:
+            self.logger.warning(
+                f"Top {top_events.height} worst single-day events across all tickers:"
+            )
+            for row in top_events.iter_rows(named=True):
+                ts = row["timestamp"]
+                date_str = ts.date().isoformat() if ts is not None else "?"
+                self.logger.warning(
+                    f"  {row['ticker']:<10} {date_str} | "
+                    f"${row['prev_close']:>10.4f} → ${row['close']:>10.4f} | "
+                    f"move: {row['pct_move']:+.1%}"
+                )
+
+        # Final summary
+        n_affected = per_ticker.filter(pl.col("n_critical") > 0).height
+        pct_affected = n_affected / len(close_cols)
+        if n_affected > 0:
+            self.logger.warning(
+                f"SUMMARY: {n_affected} of {len(close_cols)} tickers "
+                f"({pct_affected:.1%}) have at least one critical single-day "
+                f"discontinuity. These are the most likely source of "
+                f"pathological training-episode returns."
+            )
+        else:
+            self.logger.info("No critical per-ticker price discontinuities found.")
+
+    # =========================
     # Run
     # =========================
     def audit(self):
@@ -611,6 +827,8 @@ class DataAuditor:
         self._check_statistics(df)
 
         self._check_survivorship_coverage(df)
+
+        self._check_price_discontinuities(df)
 
         self._check_regime_multicollinearity(df)
 

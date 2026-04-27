@@ -25,6 +25,29 @@ from src.utils.utils import create_directory, load_stock_data, format_duration
 
 
 # ---------------------------------------------------------------------------
+# Run numbering
+# ---------------------------------------------------------------------------
+
+def _resolve_run_number(results_root: Path) -> int:
+    """
+    Scan ``results_root`` for existing ``run_N`` subdirectories and return
+    the next available N. Starts at 1 if the root doesn't exist or has no
+    matching subdirs. Non-matching entries (loose files, non-``run_*``
+    dirs) are ignored so pre-existing content doesn't block numbering.
+    """
+    if not results_root.exists():
+        return 1
+    existing = []
+    for entry in results_root.iterdir():
+        if entry.is_dir() and entry.name.startswith("run_"):
+            try:
+                existing.append(int(entry.name.split("_", 1)[1]))
+            except ValueError:
+                continue
+    return max(existing, default=0) + 1
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -140,6 +163,7 @@ class DailyTrainer:
         agent: Agent,
         all_tickers: Dict[str, TickerData],
         regime_tickers: List[str],
+        run_number: int,
         window_size: int = 60,
         episode_days: int = 252,
         batch_size: int = BATCH_SIZE,
@@ -147,6 +171,7 @@ class DailyTrainer:
         valid_interval: int = VALID_INTERVAL,
         valid_episodes_per_eval: int = 10,
         save_interval: int = SAVE_MODEL_INTERVAL,
+        incremental_save_every_valids: int = 5,
         models_dir: Union[str, Path] = MODELS_DIR,
         results_dir: Union[str, Path] = RESULTS_DIR,
         recency_decay: float = 1.5,
@@ -156,6 +181,7 @@ class DailyTrainer:
         self.agent = agent
         self.all_tickers = all_tickers
         self.regime_tickers = set(regime_tickers)
+        self.run_number = run_number
         self.window_size = window_size
         self.episode_days = episode_days
         self.batch_size = batch_size
@@ -163,14 +189,28 @@ class DailyTrainer:
         self.valid_interval = valid_interval
         self.valid_episodes_per_eval = valid_episodes_per_eval
         self.save_interval = save_interval
-        self.models_dir = Path(models_dir)
-        self.results_dir = Path(results_dir)
+        self.incremental_save_every_valids = incremental_save_every_valids
+
+        # Run-scoped paths: every artifact for this run (checkpoints,
+        # stats, plots, action plots) lives under a single `run_N/` dir
+        # so crash recovery and post-hoc analysis never cross streams
+        # between runs.
+        self.models_dir  = Path(models_dir)  / f"run_{run_number}"
+        self.results_dir = Path(results_dir) / f"run_{run_number}"
+        self.actions_dir = self.results_dir / "actions"
+        self.plots_dir   = self.results_dir / "plots"
+
+        create_directory(self.models_dir)
+        create_directory(self.results_dir)
+        create_directory(self.actions_dir)
+        create_directory(self.plots_dir)
+
         self.recency_decay = recency_decay
         self.action_plot_ticker = action_plot_ticker
         self.logger = logger
 
-        create_directory(self.models_dir)
-        create_directory(self.results_dir)
+        # Validation-call counter drives incremental _save_results.
+        self._validation_call_count = 0
 
         # Exclude regime-only tickers from trading
         self.tradable_tickers = {
@@ -220,10 +260,12 @@ class DailyTrainer:
 
         if self.logger:
             self.logger.info(
-                f"DailyTrainer initialized: "
+                f"DailyTrainer initialized (run {run_number}): "
                 f"{len(self.tradable_tickers)} tradable tickers, "
                 f"window={window_size}, episode={episode_days} days"
             )
+            self.logger.info(f"  results_dir: {self.results_dir}")
+            self.logger.info(f"  models_dir:  {self.models_dir}")
 
     # ------------------------------------------------------------------
     # Time-filtered sample pool
@@ -435,6 +477,80 @@ class DailyTrainer:
         return total_reward, info, train_loss, action_trace
 
     # ------------------------------------------------------------------
+    # Per-episode logging
+    # ------------------------------------------------------------------
+
+    def _log_episode_block(
+        self,
+        label: str,
+        ticker: str,
+        ticker_data: TickerData,
+        start_idx: int,
+        total_reward: float,
+        info: Dict[str, Any],
+        train_loss: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """
+        Emit a vertical per-episode log block.
+
+        Format ports the minute-level trainer's multi-line layout so training
+        and validation episodes read the same way across timeframes, plus the
+        daily-specific metrics (Sortino, Calmar, profit factor, avg win/loss)
+        and Alpha/Entropy when in training mode.
+        """
+        if self.logger is None:
+            return
+
+        # episode_end is exclusive in the environment; the last actually-traded
+        # day is at index (start_idx + episode_days - 1), clamped to n_bars-1.
+        last_idx = min(start_idx + self.episode_days, ticker_data.n_bars) - 1
+
+        start_date_str = np.datetime_as_string(ticker_data.timestamps[start_idx], unit="D")
+        end_date_str   = np.datetime_as_string(ticker_data.timestamps[last_idx],  unit="D")
+
+        start_price = float(ticker_data.prices[start_idx])
+        end_price   = float(ticker_data.prices[last_idx])
+        price_diff  = end_price - start_price
+        price_diff_pct = price_diff / start_price if start_price > 0 else 0.0
+
+        net_return_pct   = info["net_return_pct"]
+        gross_return_pct = info["gross_return_pct"]
+        fee_impact       = gross_return_pct - net_return_pct
+        total_shares_traded = info["total_shares_purchased"] + info["total_shares_sold"]
+
+        lines = [
+            f"\n{label} | {ticker}",
+            f"Episode Start Date:  {start_date_str}",
+            f"Episode End Date:    {end_date_str}",
+            f"Episode Start Price: ${start_price:.2f}",
+            f"Episode End Price:   ${end_price:.2f}",
+            f"Episode Price Diff:  ${price_diff:.2f} ({price_diff_pct:.2%})",
+            f"Reward Total: {total_reward:.2f}",
+            f"Balance:      ${info['balance']:.2f}",
+            f"Gross Return (Pre-Fee):  {gross_return_pct:.2%}",
+            f"Net Return (Post-Fee):   {net_return_pct:.2%}{' POSITIVE' if net_return_pct > 0 else ''}",
+            f"Fee Impact:              {fee_impact:.2%}",
+            f"Total Trade Count:  {info['trade_execution_count']}",
+            f"Turnover Ratio:     {info['turnover_ratio']:.2%}",
+            f"Avg Hold Time:      {info['avg_hold_time']:.2f}",
+            f"Sharpe Ratio:       {info['sharpe_ratio']:.2f}",
+            f"Sortino Ratio:      {info['sortino_ratio']:.2f}",
+            f"Calmar Ratio:       {info['calmar_ratio']:.2f}",
+            f"Profit Factor:      {info['profit_factor']:.2f}",
+            f"Avg Win/Loss:       {info['avg_win_loss_ratio']:.2f}",
+            f"Max Drawdown:       {info['max_drawdown']:.2%}",
+            f"Win Rate:           {info['win_rate']:.2%}",
+            f"Total Shares Traded: {total_shares_traded:.2f}",
+        ]
+
+        if train_loss is not None:
+            lines.append(f"Alpha:   {train_loss['alpha']:.4f}")
+            lines.append(f"Entropy: {train_loss['entropy']:.4f}")
+
+        lines.append("=" * 50)
+        self.logger.info("\n".join(lines))
+
+    # ------------------------------------------------------------------
     # Single-fold training
     # ------------------------------------------------------------------
 
@@ -562,23 +678,18 @@ class DailyTrainer:
             self.train_episode_tickers.append(ticker)
 
             if self.logger:
-                ma_window = min(10, len(self.train_returns))
-                ma_return = np.mean(self.train_returns[-ma_window:])
-                self.logger.info(
-                    f"  Fold {fold_idx+1} Ep {ep}/{self.num_episodes_per_fold} "
-                    f"(global {global_ep}) | "
-                    f"{ticker} | "
-                    f"Return: {net_return_pct * 100:.2f}% | "
-                    f"MA({ma_window}): {ma_return:.2f}% | "
-                    f"Trades: {info['trade_execution_count']} | "
-                    f"Sharpe: {info['sharpe_ratio']:.2f} | "
-                    f"Sortino: {info['sortino_ratio']:.2f} | "
-                    f"Calmar: {info['calmar_ratio']:.2f} | "
-                    f"PF: {info['profit_factor']:.2f} | "
-                    f"W/L: {info['avg_win_loss_ratio']:.2f} | "
-                    f"MaxDD: {info['max_drawdown'] * 100:.1f}% | "
-                    f"Alpha: {train_loss['alpha']:.4f} | "
-                    f"Entropy: {train_loss['entropy']:.4f}"
+                label = (
+                    f"Fold {fold_idx+1} EP: {ep}/{self.num_episodes_per_fold} "
+                    f"(global {global_ep})"
+                )
+                self._log_episode_block(
+                    label=label,
+                    ticker=ticker,
+                    ticker_data=td,
+                    start_idx=start_idx,
+                    total_reward=total_reward,
+                    info=info,
+                    train_loss=train_loss,
                 )
 
             # Validation
@@ -625,7 +736,7 @@ class DailyTrainer:
         valid_win_rates = []
         valid_tickers_used = []
 
-        for ticker, start_idx in self.current_valid_set:
+        for i, (ticker, start_idx) in enumerate(self.current_valid_set, 1):
             td = self.tradable_tickers[ticker]
 
             total_reward, info, _, _ = self._run_episode(td, start_idx, train=False)
@@ -643,6 +754,20 @@ class DailyTrainer:
             valid_fee_impacts.append((info["gross_return_pct"] - net_return_pct) * 100)
             valid_win_rates.append(info["win_rate"] * 100)
             valid_tickers_used.append(ticker)
+
+            label = (
+                f"VALID Fold {fold_idx+1} ep {i}/{len(self.current_valid_set)} "
+                f"(global {global_ep})"
+            )
+            self._log_episode_block(
+                label=label,
+                ticker=ticker,
+                ticker_data=td,
+                start_idx=start_idx,
+                total_reward=total_reward,
+                info=info,
+                train_loss=None,  # no gradient updates on valid → no alpha/entropy
+            )
 
         # Append means to the persistent valid_* lists so _plot_metric can
         # render both train and valid curves and _save_results can persist
@@ -685,13 +810,11 @@ class DailyTrainer:
                 train=False, capture_actions=True,
             )
             if trace is not None:
-                actions_dir = self.results_dir / "actions"
-                create_directory(actions_dir)
                 self._plot_price_with_actions(
                     prices=trace["prices"],
                     actions=trace["actions"],
                     shares_traded=trace["shares_traded"],
-                    save_path=actions_dir / (
+                    save_path=self.actions_dir / (
                         f"{self.action_plot_ticker}_fold{fold_idx+1}_ep{global_ep}.png"
                     ),
                     title=(
@@ -701,6 +824,21 @@ class DailyTrainer:
                 )
 
         self.agent.actor.train()
+
+        # Incremental persistence — every Nth validation call, re-save
+        # stats + re-render plots so a crash mid-run still leaves prior
+        # folds analyzable. Overwrites in place (last-write-wins).
+        self._validation_call_count += 1
+        if (
+            self.incremental_save_every_valids > 0
+            and self._validation_call_count % self.incremental_save_every_valids == 0
+        ):
+            if self.logger:
+                self.logger.info(
+                    f"  [incremental save] valid call "
+                    f"{self._validation_call_count} → {self.results_dir}"
+                )
+            self._save_results()
 
     # ------------------------------------------------------------------
     # Walk-forward training
@@ -743,7 +881,18 @@ class DailyTrainer:
         if self.logger:
             self.logger.info(f"\nWalk-forward training complete. Total time: {total_time}")
 
-        self._save_results(timestamp)
+        # Final model checkpoint — guarantees an end-of-training weights
+        # file exists regardless of whether the last episode landed on a
+        # save_interval boundary.
+        self.agent.save_model(
+            save_dir=self.models_dir,
+            prefix="daily_final_",
+            timestamp=timestamp,
+        )
+        if self.logger:
+            self.logger.info(f"Final model saved to {self.models_dir}")
+
+        self._save_results()
 
         return {
             "train_returns": self.train_returns,
@@ -757,10 +906,17 @@ class DailyTrainer:
     # Results
     # ------------------------------------------------------------------
 
-    def _save_results(self, timestamp: str):
-        result_dir = self.results_dir / f"daily_{timestamp}"
-        create_directory(result_dir)
+    def _save_results(self):
+        """
+        Persist training artifacts into the run-scoped results directory.
 
+        Writes:
+            self.results_dir / training_stats.pth
+            self.plots_dir   / *.png          (per-metric learning curves)
+
+        Idempotent — safe to call multiple times during training for
+        incremental snapshots as well as once at the end.
+        """
         stats = {
             # Paired train/valid metrics
             "train_returns": self.train_returns,
@@ -789,8 +945,10 @@ class DailyTrainer:
             "train_losses": self.train_losses,
             "train_episode_tickers": self.train_episode_tickers,
             "fold_boundaries": self.fold_boundaries,
+            # Run metadata
+            "run_number": self.run_number,
         }
-        torch.save(stats, result_dir / "training_stats.pth")
+        torch.save(stats, self.results_dir / "training_stats.pth")
 
         # All paired metrics — one plot per metric, both curves + stats box.
         paired_plots = [
@@ -808,7 +966,7 @@ class DailyTrainer:
         ]
         for train_data, valid_data, ylabel, filename in paired_plots:
             self._plot_metric(
-                train_data, valid_data, ylabel, "Episode", filename, result_dir
+                train_data, valid_data, ylabel, "Episode", filename, self.plots_dir
             )
 
         # Training-only loss diagnostics
@@ -817,11 +975,11 @@ class DailyTrainer:
                         "alpha", "entropy", "q_value"]:
                 values = [l[key] for l in self.train_losses]
                 self._plot_metric(
-                    values, [], key, "Episode", f"{key}.png", result_dir
+                    values, [], key, "Episode", f"{key}.png", self.plots_dir
                 )
 
         if self.logger:
-            self.logger.info(f"Results saved to {result_dir}")
+            self.logger.info(f"Results saved to {self.results_dir}")
 
     def _plot_metric(
         self, train_data, valid_data, ylabel, xlabel, filename, save_dir,
@@ -1213,11 +1371,18 @@ def main():
 
     create_directory(TRAINING_LOGS_DIR)
 
+    # Resolve run number by scanning the v5 results root. Propagates to
+    # the logger filename, models_dir, and results_dir so every artifact
+    # for this run lives under a single run_N/ bucket.
+    v5_results_base = Path(RESULTS_DIR) / "v5"
+    run_number = _resolve_run_number(v5_results_base)
+
     # Single logger instance for the entire run — captures setup (ticker
     # discovery, data loading, fold generation) plus all training/
     # validation output. Passed to both generate_walk_forward_folds and
     # DailyTrainer so everything lands in one file.
-    logger = Logger(f"{TRAINING_LOGS_DIR}/daily_wf_log.txt")
+    logger = Logger(f"{TRAINING_LOGS_DIR}/daily_wf_log_run_{run_number}.txt")
+    logger.info(f"Run number: {run_number}")
 
     # --- Config ---
     window_size = 60
@@ -1303,6 +1468,7 @@ def main():
         agent=agent,
         all_tickers=all_tickers,
         regime_tickers=REGIME_TICKERS,
+        run_number=run_number,
         window_size=window_size,
         episode_days=episode_days,
         num_episodes_per_fold=episodes_per_fold,
