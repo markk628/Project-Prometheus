@@ -19,6 +19,7 @@ from src.config.config import (
     TAU,
     ALPHA_INIT,
     TARGET_UPDATE_INTERVAL,
+    UPDATE_RATIO,
     DEVICE,
     REPLAY_BUFFER_SIZE,
     WINDOW_SIZE,
@@ -48,6 +49,7 @@ class Agent:
         tau: float = TAU,
         alpha_init: float = ALPHA_INIT,
         target_update_interval: int = TARGET_UPDATE_INTERVAL,
+        update_ratio: int = UPDATE_RATIO,
         use_automatic_entropy_tuning: bool = True,
         device: torch.device = DEVICE,
         window_size: int = WINDOW_SIZE,
@@ -66,6 +68,7 @@ class Agent:
         self.tau = tau
         self.alpha_init = alpha_init
         self.target_update_interval = target_update_interval
+        self.update_ratio = update_ratio
         self.use_automatic_entropy_tuning = use_automatic_entropy_tuning
         self.device = device
         self.max_grad_norm = max_grad_norm
@@ -174,6 +177,21 @@ class Agent:
 
     # ── SAC parameter update ─────────────────────────────────────────────
     def update_parameters(self, batch_size: int = BATCH_SIZE_MULTIDAY_MINUTE) -> Dict[str, float]:
+        """
+        Run ``self.update_ratio`` gradient updates per call (UTD ratio).
+
+        Each gradient pass samples a fresh batch from the replay buffer.
+        Same-batch repetition is avoided because it amplifies noise from
+        one specific batch rather than extracting signal across the buffer.
+
+        Target soft-update happens once per call (not per gradient pass) —
+        TAU is calibrated for the lower frequency. Target lag at 4× UTD
+        with per-step soft-updates would destabilize the critic.
+
+        Returned metrics are the MEAN across the N gradient passes — that
+        gives the trainer a representative single-number summary of the
+        call rather than just the last update's values.
+        """
         if len(self.replay_buffer) < batch_size:
             return {
                 "actor_loss": 0.0,
@@ -184,7 +202,66 @@ class Agent:
                 'q_value': 0.0
             }
 
-        # Use prefetched batch if available, otherwise sample synchronously
+        # Accumulators for mean-across-N reporting.
+        sum_actor_loss = 0.0
+        sum_critic_loss = 0.0
+        sum_alpha_loss = 0.0
+        sum_entropy = 0.0
+        sum_q_value = 0.0
+
+        for _ in range(self.update_ratio):
+            metrics = self._gradient_step(batch_size)
+            sum_actor_loss  += metrics["actor_loss"]
+            sum_critic_loss += metrics["critic_loss"]
+            sum_alpha_loss  += metrics["alpha_loss"]
+            sum_entropy     += metrics["entropy"]
+            sum_q_value     += metrics["q_value"]
+
+        # ── Soft target update (once per call, not per gradient step) ──
+        # TAU was calibrated assuming 1 target update per env step. Higher
+        # UTD with the same TAU would let the target network drift faster
+        # than the online critic can stabilize. See REDQ for the proper
+        # high-UTD-with-target-update treatment if we revisit.
+        self.train_step_counter += 1
+        if self.train_step_counter % self.target_update_interval == 0:
+            for tp, sp in zip(self.critic_target.parameters(), self.critic.parameters()):
+                tp.data.copy_(tp.data * (1.0 - self.tau) + sp.data * self.tau)
+
+        n = float(self.update_ratio)
+        mean_actor_loss  = sum_actor_loss  / n
+        mean_critic_loss = sum_critic_loss / n
+        mean_alpha_loss  = sum_alpha_loss  / n
+        mean_entropy     = sum_entropy     / n
+        mean_q_value     = sum_q_value     / n
+
+        # Bookkeeping uses the means — same shape as before, just averaged.
+        self.actor_losses.append(mean_actor_loss)
+        self.critic_losses.append(mean_critic_loss)
+        self.alpha_losses.append(mean_alpha_loss)
+        self.entropy_values.append(mean_entropy)
+        self.q_values.append(mean_q_value)
+
+        return {
+            "actor_loss":  mean_actor_loss,
+            "critic_loss": mean_critic_loss,
+            "alpha_loss":  mean_alpha_loss,
+            "entropy":     mean_entropy,
+            "alpha":       self.alpha.item(),
+            "q_value":     mean_q_value,
+        }
+
+    def _gradient_step(self, batch_size: int) -> Dict[str, float]:
+        """
+        One full SAC gradient update: critic step + actor step + alpha step.
+
+        Does NOT touch the target network — that's handled once per
+        update_parameters call regardless of UTD ratio.
+        """
+        # Use prefetched batch if available, otherwise sample synchronously.
+        # Prefetcher overlaps the next sample with this call's gradient
+        # pass — at UTD=4 the second/third/fourth samples land synchronously
+        # because numpy buffer-sampling is microseconds vs millisecond-scale
+        # gradient passes; not worth a 4-deep prefetch pipeline.
         if self._prefetch_future is not None:
             states, actions, rewards, next_states, dones = self._prefetch_future.result()
         else:
@@ -240,30 +317,12 @@ class Agent:
             self.alpha = self.log_alpha.exp()
             alpha_loss_val = alpha_loss.item()
 
-        # ── Soft target update ───────────────────────────────────────────
-        self.train_step_counter += 1
-        if self.train_step_counter % self.target_update_interval == 0:
-            for tp, sp in zip(self.critic_target.parameters(), self.critic.parameters()):
-                tp.data.copy_(tp.data * (1.0 - self.tau) + sp.data * self.tau)
-
-        # ── Book-keeping ─────────────────────────────────────────────────
-        actor_loss = actor_loss.item()
-        critic_loss = critic_loss.item()
-        mean_log_prob = log_probs.mean().item()
-        
-        self.actor_losses.append(actor_loss)
-        self.critic_losses.append(critic_loss)
-        self.alpha_losses.append(alpha_loss_val)
-        self.entropy_values.append(-mean_log_prob)
-        self.q_values.append(mean_q)
-
         return {
-            "actor_loss": actor_loss,
-            "critic_loss": critic_loss,
-            "alpha_loss": alpha_loss_val,
-            "entropy": -mean_log_prob,
-            "alpha": self.alpha.item(),
-            "q_value": mean_q
+            "actor_loss":  actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "alpha_loss":  alpha_loss_val,
+            "entropy":     -log_probs.mean().item(),
+            "q_value":     mean_q,
         }
 
     # ── Save / Load ──────────────────────────────────────────────────────

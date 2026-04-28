@@ -349,13 +349,35 @@ MULTIDAY_MINUTE_EPISODE_DAYS = 5
 HIDDEN_DIM = 128            # Hidden dim size
 LEARNING_RATE_ACTOR = 3e-4  # Actor NN learning rate
 LEARNING_RATE_CRITIC = 4.5e-4 # 3e-4 # Crtic NN learning rate
-LEARNING_RATE_ALPHA = 1e-4  # Optimizer learning rate (decrease to increase exploration (meaning alpha will reach 0 slower))
+LEARNING_RATE_ALPHA = 1e-5  # Optimizer learning rate (decrease to increase exploration (meaning alpha will reach 0 slower))
+                            # Run 4 change: 1e-4 → 1e-5. Run 3 showed alpha
+                            # collapsing aggressively (final ~0.005) even at
+                            # 1e-4 — better long-horizon regime features made
+                            # the actor confident faster, accelerating entropy
+                            # collapse. Combined with the UPDATE_RATIO bump
+                            # below (1 → 4), keeping LR at 1e-4 would put alpha
+                            # near zero by fold 4. 1e-5 holds exploration alive
+                            # through later folds without re-introducing the
+                            # over-exploration that the alpha mechanism is
+                            # designed to prevent.
 ALPHA_INIT = 0.2            # Entropy temperature (controls how random the policy is, increase to increase exploration) 
 GAMMA = 0.99                # Discount factor increase for longer episodes (higher = cares more about long term rewards)
 GAMMA_MULTIDAY_MINUTE = 0.995 # 0.999
 TAU = 0.005                 # Controls how soft the target network is updated
 REPLAY_BUFFER_SIZE = 1750000 # Replay buffer's max size (increase/decrease based on ram size)
 TARGET_UPDATE_INTERVAL = 1
+UPDATE_RATIO = 4            # Gradient updates per env step (UTD ratio).
+                            # Run 4 change: 1 → 4. Run 3 loss curves showed
+                            # the model still actively learning at fold 9
+                            # (Q-value rising, critic loss declining) when
+                            # training ended — i.e. the bottleneck is gradient
+                            # updates per transition, not transitions
+                            # themselves. Higher UTD lets the agent extract
+                            # more from each environment step before the next
+                            # one arrives. Cost: ~4× wall-clock training time.
+                            # Note: target soft-update stays at 1 per env step
+                            # (not per gradient step) — TAU is calibrated for
+                            # the lower frequency.
 SEED = 42
 
 # Training config

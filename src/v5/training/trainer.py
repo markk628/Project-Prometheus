@@ -1386,7 +1386,7 @@ def main():
     # discovery, data loading, fold generation) plus all training/
     # validation output. Passed to both generate_walk_forward_folds and
     # DailyTrainer so everything lands in one file.
-    logger = Logger(f"{TRAINING_LOGS_DIR}/daily_wf_log_run_{run_number}.txt")
+    logger = Logger(f"{TRAINING_LOGS_DIR}/v5/daily_wf_log_run_{run_number}.txt")
     logger.info(f"Run number: {run_number}")
 
     # --- Config ---
