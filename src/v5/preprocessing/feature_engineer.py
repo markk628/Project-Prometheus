@@ -2401,8 +2401,20 @@ class DataFeatureEngineer:
         # 2020, 2022), that's direct evidence the current horizons miss
         # regime signal — and a reason to prioritize this over other work.
         # ------------------------------------------------------------------
-        BREADTH_WINDOWS = [5, 20, 60]    # trading days
-        RS_WINDOWS      = [5, 20, 60]    # trading days
+        # ------------------------------------------------------------------
+        # Window choice (post-v5.1 redesign per the long-horizon plan).
+        # Short windows (5/20/60) capture day-to-week regime shifts;
+        # the long windows (200d breadth, 252d RS) integrate over
+        # quarter-to-year secular regime changes. VIX term structure
+        # stays at short windows only — see the design TODO above.
+        # ------------------------------------------------------------------
+        BREADTH_WINDOWS_SHORT = [5, 20, 60]
+        BREADTH_WINDOWS_LONG  = [200]
+        BREADTH_WINDOWS       = BREADTH_WINDOWS_SHORT + BREADTH_WINDOWS_LONG
+
+        RS_WINDOWS_SHORT = [5, 20, 60]
+        RS_WINDOWS_LONG  = [252]
+        RS_WINDOWS       = RS_WINDOWS_SHORT + RS_WINDOWS_LONG
 
         tickers_present = sorted(ticker_dfs.keys())
 
@@ -2625,30 +2637,76 @@ class DataFeatureEngineer:
                 ])
 
         # ------------------------------------------------------------------
-        # Regime momentum: 1-bar and 5-bar deltas for breadth & VIX
+        # Regime momentum deltas
+        #
+        # Two delta-window families:
+        #   * SHORT bases (breadth 5/20/60d, VIX term 5/20/60d) get
+        #     short deltas [1, 5, 20]. These capture quick regime shifts
+        #     within a short-horizon level.
+        #   * LONG bases (breadth_200d, rs_spy_252d) get medium deltas
+        #     [20, 60]. A 1-bar delta on a 200-day rolling-mean series
+        #     barely moves and adds nothing new. Medium deltas measure
+        #     "is the long-run regime in transition" — the actual signal.
+        #
+        # Why not both delta families on both base scales: short deltas
+        # on long bases are near-zero (low signal-to-noise); long deltas
+        # on short bases are noisy 2-point estimates that drop the middle
+        # of the window (high variance, low value). The matched-scale
+        # design avoids both pathologies.
         # ------------------------------------------------------------------
+        SHORT_DELTA_WINDOWS  = [1, 5, 20]
+        MEDIUM_DELTA_WINDOWS = [20, 60]
 
-        DELTA_WINDOWS = [1, 5, 20]
-
-        breadth_cols = [f"breadth_{w}d" for w in BREADTH_WINDOWS]
-        vix_ts_cols_delta = [f"vix_term_structure_{w}d" for w in VIX_TERM_WINDOWS]
-        regime_momentum_cols = [
-            c for c in breadth_cols + vix_ts_cols_delta
-            if c in stacked.columns
+        # Build the (column, delta-window) pairs explicitly per scale.
+        breadth_short_cols = [
+            f"breadth_{w}d" for w in BREADTH_WINDOWS_SHORT
+            if f"breadth_{w}d" in stacked.columns
+        ]
+        breadth_long_cols = [
+            f"breadth_{w}d" for w in BREADTH_WINDOWS_LONG
+            if f"breadth_{w}d" in stacked.columns
+        ]
+        vix_ts_cols_delta = [
+            f"vix_term_structure_{w}d" for w in VIX_TERM_WINDOWS
+            if f"vix_term_structure_{w}d" in stacked.columns
         ]
 
-        if regime_momentum_cols:
-            if self.logger:
-                self.logger.info(
-                    f"  Computing regime momentum deltas for "
-                    f"{len(regime_momentum_cols)} columns..."
+        delta_exprs = []
+        for c in breadth_short_cols + vix_ts_cols_delta:
+            for d in SHORT_DELTA_WINDOWS:
+                delta_exprs.append(
+                    pl.col(c).diff(n=d).fill_null(0.0).alias(f"{c}_delta_{d}")
+                )
+        for c in breadth_long_cols:
+            for d in MEDIUM_DELTA_WINDOWS:
+                delta_exprs.append(
+                    pl.col(c).diff(n=d).fill_null(0.0).alias(f"{c}_delta_{d}")
                 )
 
-            delta_exprs = [
-                pl.col(c).diff(n=d).fill_null(0.0).alias(f"{c}_delta_{d}")
-                for c in regime_momentum_cols
-                for d in DELTA_WINDOWS
-            ]
+        # Long-horizon RS deltas: per-ticker for each tradable. Apply only
+        # MEDIUM_DELTA_WINDOWS to the long RS bases — same rationale.
+        # Short RS bases are not delta-ed currently and we keep that
+        # convention (per-ticker rolling z-scores already capture short-
+        # horizon trend, applied during the RS normalization step above).
+        for w_long in RS_WINDOWS_LONG:
+            for ticker in tradable_tickers:
+                t_col = f"{ticker}_rs_spy_{w_long}d"
+                if t_col not in stacked.columns:
+                    continue
+                for d in MEDIUM_DELTA_WINDOWS:
+                    delta_exprs.append(
+                        pl.col(t_col).diff(n=d).fill_null(0.0)
+                            .alias(f"{t_col}_delta_{d}")
+                    )
+
+        if delta_exprs:
+            if self.logger:
+                self.logger.info(
+                    f"  Computing regime momentum deltas: "
+                    f"{len(delta_exprs)} new columns "
+                    f"(short-base × {len(SHORT_DELTA_WINDOWS)}, "
+                    f"long-base × {len(MEDIUM_DELTA_WINDOWS)})..."
+                )
             stacked = stacked.with_columns(delta_exprs)
 
         # ------------------------------------------------------------------

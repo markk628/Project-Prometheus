@@ -1210,7 +1210,12 @@ def load_tickers_from_unified(
     per_ticker_regime_suffixes = (
         "_cs_zscore",
         "_sector_zscore",
-        "_rs_spy_5d", "_rs_spy_20d", "_rs_spy_60d",
+        # RS-vs-SPY levels (short + long horizons)
+        "_rs_spy_5d", "_rs_spy_20d", "_rs_spy_60d", "_rs_spy_252d",
+        # RS-vs-SPY medium deltas on the long-horizon level. Short-horizon
+        # RS levels don't get deltas in the v5.1 design (per the matching
+        # in feature_engineer.py), so no _rs_spy_5d_delta_* etc. here.
+        "_rs_spy_252d_delta_20", "_rs_spy_252d_delta_60",
     )
 
     # --- Phase 1: classify every column once -------------------------------
