@@ -366,7 +366,7 @@ GAMMA_MULTIDAY_MINUTE = 0.995 # 0.999
 TAU = 0.005                 # Controls how soft the target network is updated
 REPLAY_BUFFER_SIZE = 1750000 # Replay buffer's max size (increase/decrease based on ram size)
 TARGET_UPDATE_INTERVAL = 1
-UPDATE_RATIO = 4            # Gradient updates per env step (UTD ratio).
+UPDATE_RATIO = 2            # Gradient updates per env step (UTD ratio).
                             # Run 4 change: 1 → 4. Run 3 loss curves showed
                             # the model still actively learning at fold 9
                             # (Q-value rising, critic loss declining) when

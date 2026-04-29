@@ -129,3 +129,21 @@ def load_stock_data(data_path: str, start_timestamp: Optional[Union[str, datetim
                 pl.col('timestamp') <= end_timestamp
             )
     return df.sort('timestamp')
+
+def resolve_run_number(results_root: Path) -> int:
+    """
+    Scan ``results_root`` for existing ``run_N`` subdirectories and return
+    the next available N. Starts at 1 if the root doesn't exist or has no
+    matching subdirs. Non-matching entries (loose files, non-``run_*``
+    dirs) are ignored so pre-existing content doesn't block numbering.
+    """
+    if not results_root.exists():
+        return 1
+    existing = []
+    for entry in results_root.iterdir():
+        if entry.is_dir() and entry.name.startswith("run_"):
+            try:
+                existing.append(int(entry.name.split("_", 1)[1]))
+            except ValueError:
+                continue
+    return max(existing, default=0) + 1

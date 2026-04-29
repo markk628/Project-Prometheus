@@ -21,30 +21,7 @@ from src.config.config import (
 from src.v5.environment.environment import DailyEnvironment
 from src.v5.model.agent import Agent
 from src.utils.logger import Logger
-from src.utils.utils import create_directory, load_stock_data, format_duration
-
-
-# ---------------------------------------------------------------------------
-# Run numbering
-# ---------------------------------------------------------------------------
-
-def _resolve_run_number(results_root: Path) -> int:
-    """
-    Scan ``results_root`` for existing ``run_N`` subdirectories and return
-    the next available N. Starts at 1 if the root doesn't exist or has no
-    matching subdirs. Non-matching entries (loose files, non-``run_*``
-    dirs) are ignored so pre-existing content doesn't block numbering.
-    """
-    if not results_root.exists():
-        return 1
-    existing = []
-    for entry in results_root.iterdir():
-        if entry.is_dir() and entry.name.startswith("run_"):
-            try:
-                existing.append(int(entry.name.split("_", 1)[1]))
-            except ValueError:
-                continue
-    return max(existing, default=0) + 1
+from src.utils.utils import create_directory, load_stock_data, format_duration, resolve_run_number
 
 
 # ---------------------------------------------------------------------------
@@ -1380,7 +1357,7 @@ def main():
     # the logger filename, models_dir, and results_dir so every artifact
     # for this run lives under a single run_N/ bucket.
     v5_results_base = Path(RESULTS_DIR) / "v5"
-    run_number = _resolve_run_number(v5_results_base)
+    run_number = resolve_run_number(v5_results_base)
 
     # Single logger instance for the entire run — captures setup (ticker
     # discovery, data loading, fold generation) plus all training/
