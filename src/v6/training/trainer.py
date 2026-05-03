@@ -18,8 +18,8 @@ from src.config.config import (
     SEED,
     BATCH_SIZE,
 )
-from src.v5.environment.environment import DailyEnvironment
-from src.v5.model.agent import Agent
+from src.v6.environment.environment import DailyEnvironment
+from src.v6.model.agent import Agent
 from src.utils.logger import Logger
 from src.utils.utils import create_directory, load_stock_data, format_duration, resolve_run_number
 
@@ -1190,7 +1190,7 @@ def load_tickers_from_unified(
         # RS-vs-SPY levels (short + long horizons)
         "_rs_spy_5d", "_rs_spy_20d", "_rs_spy_60d", "_rs_spy_252d",
         # RS-vs-SPY medium deltas on the long-horizon level. Short-horizon
-        # RS levels don't get deltas in the v5.1 design (per the matching
+        # RS levels don't get deltas in the v6 design (per the matching
         # in feature_engineer.py), so no _rs_spy_5d_delta_* etc. here.
         "_rs_spy_252d_delta_20", "_rs_spy_252d_delta_60",
     )
@@ -1348,27 +1348,22 @@ def load_tickers_from_unified(
 # ---------------------------------------------------------------------------
 
 def main():
-    import random
-    random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     create_directory(TRAINING_LOGS_DIR)
 
-    # Resolve run number by scanning the v5 results root. Propagates to
+    # Resolve run number by scanning the v6 results root. Propagates to
     # the logger filename, models_dir, and results_dir so every artifact
     # for this run lives under a single run_N/ bucket.
-    v5_results_base = Path(RESULTS_DIR) / "v5"
+    v5_results_base = Path(RESULTS_DIR) / "v6"
     run_number = resolve_run_number(v5_results_base)
 
     # Single logger instance for the entire run — captures setup (ticker
     # discovery, data loading, fold generation) plus all training/
     # validation output. Passed to both generate_walk_forward_folds and
     # DailyTrainer so everything lands in one file.
-    logger = Logger(f"{TRAINING_LOGS_DIR}/v5/daily_wf_log_run_{run_number}.txt")
+    logger = Logger(f"{TRAINING_LOGS_DIR}/v6/daily_wf_log_run_{run_number}.txt")
     logger.info(f"Run number: {run_number}")
 
     # --- Config ---
@@ -1384,7 +1379,7 @@ def main():
     )
 
     # --- Load data ---
-    unified_path = f"{DATA_DIR}/preprocessed/v5/unified/unified.parquet"
+    unified_path = f"{DATA_DIR}/preprocessed/v6/unified/unified.parquet"
 
     # Discover tickers.
     # The unified parquet retains SPY_close as a benchmark reference even
@@ -1462,8 +1457,8 @@ def main():
         valid_interval=10,
         valid_episodes_per_eval=10,
         save_interval=50,
-        models_dir=f"{MODELS_DIR}/v5",
-        results_dir=f"{RESULTS_DIR}/v5",
+        models_dir=f"{MODELS_DIR}/v6",
+        results_dir=f"{RESULTS_DIR}/v6",
         recency_decay=1.5,
         logger=logger,
     )

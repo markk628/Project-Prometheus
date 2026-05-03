@@ -6,3 +6,6 @@ __pycache__/
 /src/**/*.pkl
 /src/**/*.pt
 /logs
+/src/v6/dev_log/sharpe_ratio_removal_results/*.png
+/postgreSQL_cmd.txt
+/ta_lib-0.6.8-cp310-cp310-win_amd64.whl
