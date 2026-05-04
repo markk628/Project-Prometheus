@@ -1348,8 +1348,14 @@ def load_tickers_from_unified(
 # ---------------------------------------------------------------------------
 
 def main():
+    import random
+    random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
     create_directory(TRAINING_LOGS_DIR)
 
@@ -1422,7 +1428,7 @@ def main():
     # --- Create agent ---
     sample_td = next(iter(all_tickers.values()))
 
-    from src.v5.model.replay_buffer import DailyReplayBuffer
+    from src.v6.model.replay_buffer import DailyReplayBuffer
 
     replay_buffer = DailyReplayBuffer(
         window_size=window_size,

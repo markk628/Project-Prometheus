@@ -26,47 +26,87 @@ Architectural and structural experiments to push past the v5 ceiling. **v6 basel
 
 ## v6 TODOs (proposed run order)
 
-### Small wins first
+### Completed and rejected (do not retry)
 
-**1. Remove Sharpe from portfolio_state**
-- Real footgun. Per-step Sharpe clipped to [-3, 3] makes "real high performance" and "degenerate near-zero activity" indistinguishable to the network. Could reinforce undertrading.
-- Change is in `environment.py` `_get_observation`. Reduces portfolio_state by 1 dim. Sharpe stays in `_get_info` for logging.
-- Breaks checkpoint compatibility with v5 — clean break, fine for v6.
+**Run 1: Remove Sharpe from portfolio_state — REJECTED**
+- 3-seed MC: all 3 seeds showed v6 worse on return; 2/3 worse on Sharpe.
+- Fold 7 (COVID) collapsed -13.65% / -2.37% / -4.16% across seeds. Real
+  effect, not seed lottery.
+- Diagnosis: Sharpe-in-obs was acting as a stability anchor through regime
+  shifts. Clipping footgun was real in principle but the network was
+  productively using the unclipped middle of the distribution.
+- See `dev_log_v6.md` for full writeup.
 
-**2. More regime features from unused regime tickers**
+**Run 2: Remove win_rate from portfolio_state — REJECTED**
+- 3-seed MC: all 3 seeds worse on both return and Sharpe.
+- Broader regression than run 1 — even peak fold 6 dropped -8.23% return
+  / -0.13 Sharpe. Not just regime-shift folds.
+- Diagnosis: bimodal-at-episode pathology was real but not signal-killing.
+  Network used win_rate as slow-moving recent-strategy-quality context.
+
+### Closed: portfolio_state subtractive ablations
+
+Two-for-two on subtractive ablations being clean negatives is enough
+evidence. The current 7 portfolio_state dims are pulling weight, even
+the ones that look like footguns by inspection (clipping saturation,
+bimodal distribution). Math-level pathologies don't predict
+information-content usefulness for this network.
+
+**Closed work (do not retry):**
+- ~~Remove hold_time_ratio~~ (was planned next; skipped given the pattern)
+- ~~Remove any other portfolio_state dim by inspection~~
+
+**Future portfolio_state work pivots to ADDITIVE only.** Cumulative
+trajectory dims, windowing — see v7 deferred section. Different research
+question with different EV.
+
+### Live work (proposed run order)
+
+**Run 3: More regime features from unused regime tickers**
 - ~25 regime tickers loaded but only SPY/VIXY/VIXM contributing meaningfully.
 - Candidates: sector rotation (XLF, XLK, etc.), yield curve (TLT/SHY), credit spread (HYG/LQD), dollar regime (UUP), commodities (GLD, USO), international RS (EFA, EEM, EWJ).
 - Higher expected value than another long-horizon-of-same-thing addition.
+- Both rejected runs hit fold 7 hardest — adding macro regime context
+  is exactly what addresses regime-shift fragility.
 
 ### Bigger experiments
 
-**3. Per-ticker architecture: encoder vs MLP+deltas**
+**Run 4: Per-ticker architecture — encoder vs MLP+deltas**
 - Current: 60-day window through CNN+Transformer encoder.
 - Alternative: snapshot+deltas through MLP. Past-me wrote this TODO in `networks.py`.
-- PREREQUISITE: add per-ticker delta features in `feature_engineer.py` first.
+- PREREQUISITE: add per-ticker delta features in `feature_engineer.py` first (this is its own preprocessing-only run).
 
-**4. Replay buffer warmup before gradient updates**
+**Run 5: Replay buffer warmup before gradient updates**
 - First 50-100 episodes fill replay only, no gradient updates, fixed alpha=0.2.
 - Skips the high-alpha chaos at start of training where alpha collapses 0.99 → 0.025 in ~150 episodes.
 
-**5. Portfolio blowup early-termination**
+**Run 6: Portfolio blowup early-termination**
 - TODO already commented in `environment.py`. Just uncomment + add `MAX_DRAWDOWN_FRAC` constant.
 - `if current_portfolio_value <= initial_balance * (1 - 0.30): done = True`
 - Drawdown from initial, not peak.
 - Watch `avg_episode_length` once enabled; early terms skew replay buffer toward early-episode transitions.
 
-### Infrastructure (do alongside the work above)
+### Methodology (locked in)
 
-**6. Determinism hardening for clean ablations**
-- `random.seed(SEED)`, `torch.cuda.manual_seed_all(SEED)`
-- `torch.backends.cudnn.deterministic = True`
-- `torch.backends.cudnn.benchmark = False`
-- Lock column order in unified parquet so re-preprocessing doesn't shuffle features.
+**3-seed MC is now standard for every v6 ablation.** Seeds 42, 43, 44.
+Determinism hardening on (cudnn.deterministic=True, cudnn.benchmark=False,
+all RNGs seeded). Single-seed runs rejected as decision-grade evidence —
+runs 1 and 2 both demonstrated single-seed results lying about direction.
+
+**Reference distribution to beat:** v5 baseline 3-seed: ret_mean +9.18%
+± 3.41, sh_mean +0.48 ± 0.05.
+
+### Infrastructure (already shipped)
+
+**Determinism hardening** — DONE during pre-run-1 work. cudnn deterministic
+mode + full RNG coverage. Stays on for all v6 runs.
+- Lock column order in unified parquet so re-preprocessing doesn't shuffle features. (still pending)
 
 ## Pure housekeeping (no version, do anytime)
 
 - **File-split refactor of `feature_engineer.py`** (~3000 lines). Plan documented in v5 dev log. Bottom-up move starting with `constants.py`, `sectors.py`, `calendar.py`. No logic changes.
 - **Centralize `DISCONTINUITY_LOG_THRESHOLD`** in config.py (currently in feature_engineer.py with reference comment in auditor.py).
+
 
 ---
 
@@ -139,7 +179,7 @@ In v6 single-ticker, portfolio_state has only 6-7 dims and the marginal value of
 Consider batching with the window change since they touch the same code:
 
 - **Cumulative trajectory dims**: realized P&L so far, fraction of episode spent invested, max position size reached. New info about agent behavior across the episode beyond what's in current snapshot.
-- **Removing win_rate**: pre-staked TODO from v5. Bimodal at episode level, low SNR. Would have been a v6 candidate, but the Sharpe-removal lesson (run 1) suggests treating "obvious footguns" with skepticism — the metric might still be doing useful work the math doesn't capture. If touched, do it under MC.
+- **win_rate stays.** Tested in v6 run 2 (3-seed MC), all seeds worse, reverted. Not a candidate for further removal. Listed here because if a portfolio_state overhaul touches this code, the temptation to "fix" win_rate's bimodal distribution might come up — don't. The metric's bimodality is real but the network is using it productively.
 
 If a portfolio_state overhaul run happens, batching these makes sense — they share code paths and are all "portfolio_state content" decisions. But that's an architectural redesign, not a single-variable ablation, and would need to be framed as such.
 
@@ -169,6 +209,12 @@ If a portfolio_state overhaul run happens, batching these makes sense — they s
 - Within-fold trajectory matters as much as fold-end snapshot.
 - Verify config against actual GitHub commits before assuming working-copy state matches.
 
+**Working principles added during v6:**
+- 3-seed MC for every ablation. Single-seed direction calls were wrong on both run 1 and run 2 — the methodology earned its keep twice in two runs.
+- Determinism (cudnn.deterministic=True, full RNG coverage) holds the hardware-noise floor constant so MC seed-spread reflects algorithmic stochasticity only.
+- Math-level "footguns" (clipping, bimodality) don't predict information-content usefulness. The network extracts signal from whatever distribution is present. Test before shipping.
+- Subtractive portfolio_state ablations are closed: 7 dims pull weight, even the ugly-looking ones. Future portfolio_state work is additive only.
+
 **Polygon data caveats already known:**
 - ~1100 suspect 50-100% one-day moves (unapplied splits Polygon doesn't have, e.g. GOOG 2014-04-03 Class C creation)
 - Decision: live with it for v5/v6, fix via Databento in v7.
@@ -182,17 +228,23 @@ Baseline config carried forward from v5 run 5:
 - LEARNING_RATE_ALPHA = 1e-5
 - All run-3 regime features
 - All run-2 data fixes
+- 7-dim portfolio_state (cash, stock, unrealized PnL, sharpe, hold-time, drawdown, win_rate)
 
-v6 runs each add one variable on top:
+Methodology: 3-seed MC (42, 43, 44) for every run. Determinism on.
 
-- Run 1: remove Sharpe from portfolio_state
-- Run 2: + new regime features (sector rotation, yield curve, etc.)
-- Run 3: + per-ticker delta features (preprocessing change, no model change yet)
-- Run 4: + MLP-only architecture for per-ticker path
-- Run 5: + replay buffer warmup
-- Run 6: + portfolio blowup early-termination
+History and remaining sequence:
 
-Each adds one variable on top of the previous. If any one fails to help, revert and continue building from the last known-good config.
+- ~~Run 1: remove Sharpe from portfolio_state~~ — REJECTED (3-seed MC negative)
+- ~~Run 2: remove win_rate from portfolio_state~~ — REJECTED (3-seed MC negative)
+- **Run 3 (next): + new regime features** (sector rotation, yield curve, etc.)
+- Run 4: + per-ticker delta features (preprocessing change, no model change yet)
+- Run 5: + MLP-only architecture for per-ticker path
+- Run 6: + replay buffer warmup
+- Run 7: + portfolio blowup early-termination
+
+Each adds one variable on top of the previous accepted baseline. If any one
+fails to help under 3-seed MC, revert and continue building from the last
+known-good config.
 
 ---
 

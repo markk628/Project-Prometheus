@@ -220,18 +220,156 @@ intuitions about the observation space. Test before shipping.
 
 ---
 
-## Where v6 Stands After Run 1 (Rejected)
+## Run 2 — Remove win_rate from portfolio_state (REJECTED)
 
-- v6 baseline = v5 run-5 config exactly. Sharpe back in portfolio_state
-  (7 dims).
-- Determinism hardening is in and stays in for all future runs.
-- 3-seed MC is now the methodology for every v6 ablation.
-- v5 reference distribution saved for cross-run comparisons.
-- v6_handoff run sequence shifts up one: the "remove Sharpe from
-  portfolio_state" run is done and rejected; original run 2 (new regime
-  features) becomes run 1.
+**Hypothesis:** Per-episode win_rate is bimodal at the episode level. The
+trainer's `_get_win_rate` only counts a "completed trade" when shares_held
+goes to zero (full exit) or at EOD liquidation. With the dollar deadband
+at 7% and the agent settling into a target-exposure mode, most episodes
+complete 0-1 round-trips. One round-trip → win_rate ∈ {0%, 100%}. Train
+median for win_rate hovered at 0%, and the metric was structurally
+asking too much of one episode given how the env counts trades. The
+training-curve plot (`win_rates.png`) showed exactly this bimodal
+pathology — train MA(10) bouncing between extremes, validation smoothed
+to multiples of 10 around 50%. Pre-staked TODO from the v5 portfolio_state
+design.
 
-## Pending Run 2 (originally Run 2 in handoff): More Regime Features
+Premise: removing win_rate should be neutral or positive — the dim is
+mostly noise, the network is conditioning policy on a low-SNR signal.
+
+**Changes:**
+
+- `environment.py::_get_observation`: dropped win_rate slot from
+  `portfolio_state`. 7 dims → 6 dims (cash ratio, stock ratio,
+  unrealized PnL, sharpe, hold-time ratio, current drawdown).
+- win_rate stays in `_get_info` for logging.
+- v6 baseline for run 2 = v5 run-5 config exactly (Sharpe restored after
+  run 1 rejection).
+
+**Versions and Runs:**
+- v5: runs 6, 7, 8 (seeds 42, 43, 44)
+- v6: runs 5, 6, 7 (seeds 42, 43, 44)
+
+**Methodology:** 3-seed MC from the start (42, 43, 44). No single-seed
+run first — run 1 taught us not to.
+
+**Results — same-seed paired comparison (v6-no-WR minus v5-baseline):**
+
+| Seed | Ret Δ | Sharpe Δ | Pos% Δ |
+|---|---|---|---|
+| 42 | -0.47 | -0.025 | -2.00 |
+| 43 | -1.04 | -0.035 | +0.06 |
+| 44 | -5.02 | -0.120 | -5.50 |
+
+All three seeds: v6 worse on return AND Sharpe. Direction unanimous,
+magnitudes range from "barely measurable" to "substantial." Seed 44
+collapsed -5pt return / -0.12 Sharpe — bigger paired regression than any
+single seed showed during run 1.
+
+**Cross-seed aggregate:**
+
+| | Return mean | Sharpe mean |
+|---|---|---|
+| v5 baseline (3-seed) | +9.18% ± 3.41 | +0.48 ± 0.05 |
+| v6 no-WR (3-seed) | +7.01% ± 1.64 | +0.42 ± 0.02 |
+
+**Fold-level head-to-head across 27 paired comparisons:**
+
+- Return: v6 wins 9, losses 18 (33% win rate)
+- Sharpe: v6 wins 10, losses 17 (37% win rate)
+
+Worse than run 1 (which had ~41-44% win rates). win_rate-removal is more
+consistently degrading across folds than Sharpe-removal was.
+
+**Per-fold pattern is informative:**
+
+```
+Fold 6: Δ ret -8.23%,  Δ sh -0.13   ← peak fold takes a big hit
+Fold 7: Δ ret -5.91%,  Δ sh -0.14   ← COVID, hit again (same as run 1)
+Fold 9: Δ ret -2.51%,  Δ sh -0.22   ← largest Sharpe drop
+Others: neutral or small negatives
+```
+
+Fold 6 dropping is notable — it's not a regime-shift fold, it's where v5
+has its best fold (peak +42.30% mean, the fold that first cleared
+sustained Sharpe > 1.0 in v5 capstone). v6 dropped to +34.07% / 1.04
+mean Sharpe. So unlike run 1 (Sharpe-removal mostly hurt regime-shift
+handling), win_rate-removal hurts even in peak performance folds. The
+network was using win_rate productively in MORE situations than Sharpe.
+
+**Excluding fold 7:**
+
+| | Return mean | Sharpe mean |
+|---|---|---|
+| v5 baseline | +10.43% | +0.53 |
+| v6 no-WR | +8.72% | +0.48 |
+
+Still consistently worse. Not a fold-7 phenomenon this time — the
+regression is broad-based.
+
+**Diagnosis:** Despite the bimodal-at-episode pathology being real, the
+network was using win_rate productively. Probably as a slow-moving
+"recent strategy quality" signal — even with episode-level bimodality,
+the trajectory of win_rate across batches gives the policy useful
+context about whether its current behavior is paying off. The bimodality
+made the *training curve plot* look weird, but it didn't make the
+*signal to the network* useless.
+
+**Decision: REVERT.** Restore win_rate to `portfolio_state`. v6 baseline
+returns to v5 run-5 config exactly (7 portfolio dims) for the second
+time.
+
+---
+
+## Cross-Cutting Lessons from Run 2
+
+**Two-for-two on portfolio_state subtractive ablations being clean
+negatives.** Both Sharpe (run 1) and win_rate (run 2) looked like
+"obvious footguns" by their math characteristics — clipping saturation,
+bimodal episode-level distribution. Both turned out to be doing real
+work. The pattern is now strong enough to act on.
+
+**The "find footguns by inspection" approach to portfolio_state is
+unreliable.** Math-level pathologies (clipping, bimodality, redundancy)
+don't predict information-content-level usefulness. The network
+extracts whatever signal is present in whatever distribution shape, and
+"this looks ugly to a human" isn't the right test.
+
+**Subtractive sweep stops here.** Two clean negatives is enough evidence.
+hold_time_ratio was the planned next test — skipping it. Cost-benefit
+flipped: ~27 more compute-hours for a test that's now low-EV given the
+established pattern. Documenting the decision so future-me doesn't
+relitigate.
+
+**Future portfolio_state work pivots to additive only.** Cumulative
+trajectory dims (realized P&L, fraction-time-invested, max-position),
+windowing over portfolio_state — these add new info that's plausibly
+orthogonal to existing dims, not subtract dims that "look bad."
+Different research question, different EV profile.
+
+**MC paid for itself again.** Seed 42 alone showed -0.47% return / -0.025
+Sharpe — a "tiny shrug" result that could plausibly have been called
+neutral and the change shipped. Seed 44 showed -5.02% / -0.12. Without
+3-seed MC, ship-vs-revert call would have been wrong roughly 1-in-3 times
+on this kind of marginal change. Methodology earned its keep.
+
+---
+
+## Where v6 Stands After Run 2 (Rejected)
+
+- v6 baseline = v5 run-5 config exactly. Both Sharpe and win_rate restored
+  to portfolio_state (7 dims). Same as it was before run 1.
+- Determinism hardening stays in for all future runs.
+- 3-seed MC remains the methodology for every v6 ablation.
+- v5 reference distribution: ret_mean +9.18% ± 3.41, sh_mean +0.48 ± 0.05.
+  Bar to beat for the rest of v6.
+- Subtractive portfolio_state work closed. Additive work deferred to v7+
+  per `v6_handoff.md` v7 section.
+- v6_handoff run sequence: with both portfolio_state runs rejected,
+  the next live work is what was originally "Run 2" in the v5-era handoff
+  — new regime features. That's now v6 run 3.
+
+## Pending Run 3: More Regime Features
 
 Plan unchanged from v6_handoff. Sector rotation (XL* ETFs), yield curve
 (TLT/SHY or TLT/IEF ratio), credit spread (HYG/LQD), dollar regime (UUP),
@@ -241,6 +379,6 @@ factor (IWM/SPY, MDY/SPY), growth factor (QQQ/SPY).
 Higher EV than another long-horizon-of-same-thing addition, and run 1's
 fold-7 result specifically points at "macro regime context during regime
 shifts" as a weak spot — adding macro regime features is exactly what
-addresses that.
+addresses that. Run 2's fold-7 hit reinforces this.
 
-3-seed MC, same as run 1.
+3-seed MC, same standard.
