@@ -1,9 +1,10 @@
 import os
 import pandas as pd
 import polars as pl
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 from src.utils.logger import Logger
 
@@ -146,4 +147,24 @@ def resolve_run_number(results_root: Path) -> int:
                 existing.append(int(entry.name.split("_", 1)[1]))
             except ValueError:
                 continue
+    return max(existing, default=0) + 1
+
+def resolve_preprocess_run_number(log_dir: Path) -> int:
+    """
+    Scan `log_dir` for existing `preprocess_run_N.txt` files and return
+    the next available N. Starts at 1 if the directory doesn't exist
+    or has no matching files.
+    """
+    if not log_dir.exists():
+        return 1
+
+    pattern = re.compile(r"^preprocess_run_(\d+)\.txt$")
+    existing = []
+
+    for entry in log_dir.iterdir():
+        if entry.is_file():
+            match = pattern.match(entry.name)
+            if match:
+                existing.append(int(match.group(1)))
+
     return max(existing, default=0) + 1

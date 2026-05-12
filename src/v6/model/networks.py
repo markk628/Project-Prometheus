@@ -43,7 +43,9 @@ import torch
 import torch.nn as nn
 from typing import Dict, Tuple
 
-from src.config.config import HIDDEN_DIM, DEVICE
+from src.config.config import HIDDEN_DIM
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class FeatureExtractor(nn.Module):

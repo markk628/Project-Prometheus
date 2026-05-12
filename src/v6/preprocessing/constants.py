@@ -41,3 +41,36 @@ MIN_TICKER_LENGTH = NORMALIZATION_WINDOW + WINDOW_SIZE + 252  # 564 bars
 # reports against in _check_price_discontinuities — after this filter
 # runs, the auditor's critical-breach count should be ~0.
 DISCONTINUITY_LOG_THRESHOLD = 0.6931
+
+# Shared regime feature column prefixes.
+#
+# These name the families of regime features that are computed once per
+# timestamp (NOT once per ticker) in _build_unified. Centralized here so
+# both the auditor (categorization + multicollinearity check) and the
+# trainer (column classification when loading unified.parquet into
+# TickerData) use the same source of truth. Adding a new shared-regime
+# family means adding its prefix here once.
+#
+# Two groupings because they were introduced at different times and the
+# auditor reports them separately in its feature-count summary:
+#   - BREADTH_VIX_PREFIXES: original v5 regime features (breadth, vix term)
+#   - MACRO_REGIME_PREFIXES: v6 run 3a additions (yield curve, credit
+#     spread, size/growth factor, sector rotation)
+# SHARED_REGIME_PREFIXES is the union, suitable for any code that just
+# needs to know "is this a shared regime column?" without caring which
+# family.
+BREADTH_VIX_PREFIXES = (
+    "breadth_",
+    "vix_term_",
+)
+
+MACRO_REGIME_PREFIXES = (
+    "yield_curve_",
+    "credit_spread_",
+    "size_factor_",
+    "growth_factor_",
+    "sector_dispersion_",
+    "sector_topbottom_",
+)
+
+SHARED_REGIME_PREFIXES = BREADTH_VIX_PREFIXES + MACRO_REGIME_PREFIXES

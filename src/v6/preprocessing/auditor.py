@@ -9,6 +9,12 @@ from src.config.config import DATA_DIR
 from src.utils.logger import Logger
 from src.utils.utils import save_to_parquet
 
+from .constants import (
+    BREADTH_VIX_PREFIXES,
+    MACRO_REGIME_PREFIXES,
+    SHARED_REGIME_PREFIXES,
+)
+
 
 class DataAuditor:
     def __init__(
@@ -90,6 +96,10 @@ class DataAuditor:
         # Shared regime features
         breadth_cols = [c for c in feature_cols if c.startswith("breadth_") and "_delta_" not in c]
         vix_cols = [c for c in feature_cols if c.startswith("vix_term_") and "_delta_" not in c]
+        macro_cols = [
+            c for c in feature_cols
+            if c.startswith(MACRO_REGIME_PREFIXES) and "_delta_" not in c
+        ]
 
         # Regime momentum deltas
         delta_cols = [c for c in feature_cols if "_delta_" in c]
@@ -101,8 +111,7 @@ class DataAuditor:
             and c not in cs_global_cols
             and c not in cs_sector_cols
             and "_rs_spy_" not in c
-            and not c.startswith("breadth_")
-            and not c.startswith("vix_term_")
+            and not c.startswith(SHARED_REGIME_PREFIXES)
             and "_delta_" not in c
         ]
 
@@ -114,6 +123,7 @@ class DataAuditor:
         self.logger.info(f"  RS vs SPY: {len(rs_cols)}")
         self.logger.info(f"  Breadth: {len(breadth_cols)}")
         self.logger.info(f"  VIX term structure: {len(vix_cols)}")
+        self.logger.info(f"  Macro regime: {len(macro_cols)}")
         self.logger.info(f"  Regime deltas: {len(delta_cols)}")
 
     # =========================
@@ -597,8 +607,7 @@ class DataAuditor:
         # Identify regime-only columns
         regime_cols = [
             c for c in df.columns
-            if c.startswith("breadth_")
-            or c.startswith("vix_term_")
+            if c.startswith(SHARED_REGIME_PREFIXES)
             or "_rs_spy_" in c
             or "_delta_" in c
         ]

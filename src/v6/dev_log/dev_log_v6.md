@@ -79,10 +79,6 @@ Sharpe stays in `_get_info` for logging — only removed from observation.
 - Replay buffer flat-state width updated automatically via passed-in arg.
 - Breaks checkpoint compatibility with v5 — clean v6 break.
 
-**Versions and Runs:**
-- v5: runs 6, 7, 8 (seeds 42, 43, 44)
-- v6: runs 2, 3, 4 (seeds 42, 43, 44)
-
 **Initial result (single seed = 42):**
 
 | Metric | v5 | v6 | Δ |
@@ -115,7 +111,7 @@ sweep to disambiguate.
 - Determinism on for all 6 runs (cudnn.deterministic=True,
   cudnn.benchmark=False, all seeds covered) — varies algorithmic
   stochasticity across seeds, holds hardware-noise floor constant.
-- 6 runs total
+- 6 runs total, ~54 wall-clock hours.
 
 **MC results — same-seed paired comparison (v6 minus v5):**
 
@@ -246,10 +242,6 @@ mostly noise, the network is conditioning policy on a low-SNR signal.
 - v6 baseline for run 2 = v5 run-5 config exactly (Sharpe restored after
   run 1 rejection).
 
-**Versions and Runs:**
-- v5: runs 6, 7, 8 (seeds 42, 43, 44)
-- v6: runs 5, 6, 7 (seeds 42, 43, 44)
-
 **Methodology:** 3-seed MC from the start (42, 43, 44). No single-seed
 run first — run 1 taught us not to.
 
@@ -355,30 +347,233 @@ on this kind of marginal change. Methodology earned its keep.
 
 ---
 
-## Where v6 Stands After Run 2 (Rejected)
+## Run 3a — More regime features (REJECTED)
 
-- v6 baseline = v5 run-5 config exactly. Both Sharpe and win_rate restored
-  to portfolio_state (7 dims). Same as it was before run 1.
-- Determinism hardening stays in for all future runs.
-- 3-seed MC remains the methodology for every v6 ablation.
-- v5 reference distribution: ret_mean +9.18% ± 3.41, sh_mean +0.48 ± 0.05.
-  Bar to beat for the rest of v6.
-- Subtractive portfolio_state work closed. Additive work deferred to v7+
-  per `v6_handoff.md` v7 section.
-- v6_handoff run sequence: with both portfolio_state runs rejected,
-  the next live work is what was originally "Run 2" in the v5-era handoff
-  — new regime features. That's now v6 run 3.
+**Setup.** Three preprocessing-level changes shipped together as one variable
+("more shared regime features"):
 
-## Pending Run 3: More Regime Features
+1. **File-split refactor of `feature_engineer.py`** — pulled the
+   pre-class section out into 8 helper modules (`constants`, `sectors`,
+   `nyse_calendar`, `splits`, `gaps`, `features`, `normalization`,
+   `worker`). Pure code motion, verified bit-identical output via
+   `df.equals` on unified.parquet. Not a behavior change.
+2. **5 new macro regime feature families** in a new `regime_features.py`
+   module:
+   - Yield curve — `log(TLT/SHY)` smoothed at 5d / 60d + 60d delta
+   - Credit spread — `log(HYG/LQD)` smoothed at 5d / 60d + 60d delta
+   - Size factor — `log(IWM/SPY)` smoothed at 5d / 60d + 60d delta
+   - Growth factor — `log(QQQ/SPY)` smoothed at 5d / 60d + 60d delta
+   - Sector rotation — cross-sectional dispersion + topbottom of the 11
+     XL\* ETF cumulative returns at 60d / 200d + 20d deltas on long
+     horizons
+   - **18 new shared regime columns total** (12 levels + 6 deltas).
+3. **`_resolve_close_col` helper** for transparent handling of
+   lifecycle-segmented regime tickers (HYG.2, QQQ.2 — the .1 segments
+   got dropped by MIN_TICKER_LENGTH).
 
-Plan unchanged from v6_handoff. Sector rotation (XL* ETFs), yield curve
-(TLT/SHY or TLT/IEF ratio), credit spread (HYG/LQD), dollar regime (UUP),
-commodities (GLD, USO), international RS (EFA, EEM, EWJ vs SPY), size
-factor (IWM/SPY, MDY/SPY), growth factor (QQQ/SPY).
+Also fixed a latent bug in `trainer.py::load_tickers_from_unified` where
+the column classifier hardcoded `("breadth_", "vix_term_")` as the only
+shared regime prefixes — all 18 new macro columns were silently dropped
+from `TickerData.data` on the first attempted run. Found via the new
+`TickerData.columns` attribute by inspecting AAPL in a notebook (data
+shape was 92 instead of 110). Fix: unified prefix list in
+`constants.SHARED_REGIME_PREFIXES`, imported by both auditor and trainer.
 
-Higher EV than another long-horizon-of-same-thing addition, and run 1's
-fold-7 result specifically points at "macro regime context during regime
-shifts" as a weak spot — adding macro regime features is exactly what
-addresses that. Run 2's fold-7 hit reinforces this.
+**Hypothesis.** Adding macro regime context should help generalization
+across regime shifts, especially the COVID-like fold 7 fragility seen in
+runs 1 and 2. The "broad-spectrum regime context" framing — yield curve
+inversion, credit spread widening, sector dispersion — describes the
+*mechanism* of regime change, not just specific events.
+
+**Methodology.** 3-seed MC (42, 43, 44) with determinism on, comparing
+against the 3-seed v5 baseline.
+
+**Results — cross-seed aggregate:**
+
+| | Return mean | Sharpe mean | Sharpe median | Pos rate |
+|---|---|---|---|---|
+| v5 baseline (3-seed) | +9.18% ± 3.41 | +0.485 ± 0.052 | +0.43 | 62.0% |
+| v6 run 3a (3-seed)   | +7.79% ± 3.56 | +0.465 ± 0.063 | +0.46 | 59.9% |
+
+**Same-seed paired delta (3a minus v5):**
+
+| Seed | Δ Return | Δ Sharpe | Δ Pos% |
+|---|---|---|---|
+| 42 | +1.25 | +0.050 | -1.22 |
+| 43 | -2.48 | -0.044 | -2.94 |
+| 44 | -2.95 | -0.065 | -2.17 |
+
+Unlike runs 1 and 2 (3/3 seeds unanimously worse), this is **1 seed win,
+2 seed losses**. Closer to the noise floor than to a clean rejection.
+
+**Per-fold breakdown (3-seed means, 3a minus v5):**
+
+```
+Fold   Δ ret    Δ sharpe    Interpretation
+1      +0.28    +0.02       wash
+2      +0.41    +0.05       small win
+3      +0.77    +0.07       small win
+4      -2.77    -0.06       meaningful loss
+5      +2.70    +0.04       notable win  (regime-shift fold)
+6      -6.78    -0.08       big loss     (v5's peak fold)
+7      -6.13    -0.16       big loss     ← THE PROBLEM
+8      +2.88    +0.03       notable win  (regime-shift fold)
+9      -3.93    -0.08       meaningful loss
+```
+
+**Fold-level head-to-head (27 pairs):** 3a wins 13/27 on return, 15/27
+on Sharpe. Coin-flip territory.
+
+**Decision rule scorecard** (rule was set before MC kicked off):
+
+| Criterion | Verdict |
+|---|---|
+| Cross-seed mean must improve return AND Sharpe | **FAIL** (-1.39 ret, -0.020 sh) |
+| Regime-shift folds (5,7,8) must improve more than average | **FAIL** (-0.18 ret, -0.03 sh — flat) |
+| Quiet-bull folds must NOT regress meaningfully | **MARGINAL** (-2.00 ret, -0.01 sh) |
+| At least 6 of 9 folds improve | **FAIL** (5/9 on both ret and Sharpe) |
+
+By the rule we agreed to before training kicked off, this rejects.
+
+**The fold 7 result is the most important finding.** 3a was specifically
+designed to test the hypothesis "macro regime context helps regime
+shifts," and fold 7 (COVID) is the canonical regime-shift fold. 3a made
+fold 7 *worse*: -6.13 pts return, -0.16 Sharpe, consistent across all 3
+seeds. The hypothesis got falsified.
+
+**The fold 5/8 vs fold 7 split is informative.** Folds 5 and 8 (other
+regime-shift folds) *did* improve with macro features, by 2-3pts return.
+But fold 7 sharply regressed. The likely mechanism: macro features
+captured the shape of regime shifts that look like 2008 (gradual credit
+spread widening, yield curve inversion, sector rotation) but COVID
+didn't look like 2008. March 2020 was an "everything sells off including
+treasuries briefly, then policy backstop" pattern that doesn't fit the
+historical training data shape. The 60d-smoothed features were too slow
+to register the shift; by the time they did, policy response had already
+reshaped the regime.
+
+**Fold 6 regression worth flagging separately.** v5's peak fold (the
+first to sustain Sharpe > 1.0) dropped 6.78pts in return with 3a.
+Mechanism likely: with new features available, the network reorganized
+attention away from per-ticker signals that were carrying weight in fold
+6. Adding features can hurt even when those features encode real
+information, if they redirect the policy away from what was working.
+
+**Decision: REVERT.** v6 baseline returns to v5 run-5 config for the
+third time. Skip 3b — the speculative families (dollar, commodities,
+international) have weaker priors than 3a's families and the bundle
+hypothesis already failed at the strongest-prior version. Move on to
+run 4.
+
+---
+
+## Cross-Cutting Lessons from Run 3a
+
+**The single-variable rule applies even to bundled feature families.**
+Run 3a shipped 5 feature families as one variable because they're all
+"shared regime context" semantically. That's a defensible single-variable
+boundary, but it means we can't attribute the result to individual
+families. Folds 5/8 improved and fold 7 regressed — those might be
+driven by different families within the bundle, and we don't know
+which. Worth thinking about in future feature-batch runs: prefer
+bundling families that share a *mechanism* (all credit-related, all
+rate-related) over bundling families that just share a *category*
+("macro stuff").
+
+**Single-feature ablation within a rejected bundle is rarely worth the
+cost.** Tempting to spend 5×3=15 runs (~135 hours) to find which family
+helped vs hurt. Not worth it: (1) the bundle is already at the noise
+floor, so individual family signals would be smaller still; (2) the
+1-of-3 seeds positive pattern suggests no robust single-family signal
+hiding inside; (3) the falsified hypothesis (fold-7 specifically) is the
+informative result, not which family did it. Move forward instead of
+rabbit-holing.
+
+**Decision rule pre-commitment paid off.** Without the strict rule
+written down before training, the temptation post-hoc would have been
+to ship on "Sharpe median basically unchanged, two regime folds improved,
+maybe okay overall." The rule kept us honest: the change failed on the
+specific dimension it was designed to address (fold 7). Worth restating
+the principle: **commit to the decision rule before MC results are in.**
+
+**Speed-of-feature-response matters for the fold-7-style regime.** All
+of run 3a's families use 60d smoothing. That's appropriate for slow
+regime shifts (rate cycles, credit cycle turning) but too slow for sudden
+shocks like COVID. If we ever come back to macro features, the design
+question to think about is "what time scale of regime shift is this
+feature targeting" — 5d / 20d short-window variants might catch what
+60d misses, at the cost of more noise.
+
+**Three rejected runs in a row is data about the problem shape, not the
+methodology.**
+
+- Run 1 (Sharpe removal): "obvious footguns" aren't always footguns
+- Run 2 (win_rate removal): same lesson reinforced
+- Run 3a (macro features): broad-spectrum regime context doesn't transfer
+  to single-ticker decisions reliably
+
+Each rejection has been *informative*, not just negative. Run 3a in
+particular suggests something genuine: macro regime features describe
+market-wide conditions, but the agent's decision is about whether to be
+in *this specific ticker* right now. The marginal value of macro context
+for that question is apparently small, because per-ticker idiosyncratic
+noise dominates the single-ticker timing problem.
+
+That's the v7 thesis confirming itself in v6 data: single-ticker timing
+has a low ceiling. v5 run-5's +9.18% / 0.48 Sharpe (3-seed) is plausibly
+close to the realistic ceiling for this approach. The bigger gains live
+in v7's allocation pivot. If runs 4-7 also reject, that's not failure —
+that's discovering the v6 architectural search space doesn't move the
+needle, and the path forward really is v7.
+
+---
+
+## Where v6 Stands After Run 3a (Rejected)
+
+- v6 baseline = v5 run-5 config. Both Sharpe and win_rate in
+  portfolio_state (7 dims). No macro regime features.
+- The file-split refactor of `feature_engineer.py` STAYS — that was pure
+  code motion, verified bit-identical, and is an unambiguous codebase
+  win. Future code goes into the right modules.
+- `regime_features.py` and the `_resolve_close_col` helper stay in the
+  codebase but aren't called from `_build_unified` anymore. Cheap
+  insurance for the day macro features come back in a different form
+  (v7 portfolio likely wants some of this work).
+- The `SHARED_REGIME_PREFIXES` constant + the `TickerData.columns`
+  attribute stay — those are quality improvements regardless of run-3a's
+  fate. The trainer-classifier bug they exposed was real and would have
+  silently affected any future regime-feature addition.
+- v5 reference distribution unchanged: ret_mean +9.18% ± 3.41,
+  sh_mean +0.48 ± 0.05.
+- 3b (speculative regime features: dollar, commodities, international,
+  factors not in 3a) is **shelved**, not scheduled. Justification:
+  weaker priors than 3a, bundle hypothesis failed at the strongest
+  version, and the international families need EFA/EEM data fixes
+  anyway.
+
+## Pending Run 4: Per-ticker architecture (encoder vs MLP)
+
+Per v6_handoff: the current `FeatureExtractor` processes a (60, 25)
+market-data sequence through CNN+Transformer, but many of the 25
+features are already multi-horizon summaries themselves (log_return_5/
+20/60, volatility_5_20_ratio, ema_5_20_ratio, etc.). Feeding 60
+timesteps of multi-horizon summaries through a sequence encoder is
+probably redundant with what the features already encode.
+
+Two architectural options per the `networks.py` TODO:
+
+1. **MLP-only market path.** Drop the encoder. Pass the last-timestep
+   25-dim market vector through an MLP. **PREREQUISITE**: add per-ticker
+   delta features in `feature_engineer.py` first (the 25 ticker features
+   are levels and ratios, not changes — an MLP on a snapshot can't
+   distinguish "building for 30 days" from "spiked yesterday").
+2. **Minimal CNN + MLP.** Single 1D conv layer + AdaptiveAvgPool, no
+   transformer. Cheaper insurance than option 1, no feature-engineering
+   change needed.
+
+Open question whether to ship the per-ticker delta features as Run 4a
+(preprocessing only, no model change) before testing the MLP-only path
+as Run 4b. The deltas are useful with the existing encoder too — they're
+not strictly an MLP-only thing. Could be a clean two-run sequence.
 
 3-seed MC, same standard.

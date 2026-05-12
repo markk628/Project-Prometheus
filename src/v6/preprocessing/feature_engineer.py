@@ -18,8 +18,8 @@ from .constants import (
     GAP_SUSPICIOUS_TRADING_DAYS,
     NORMALIZATION_WINDOW,
 )
-from .gaps import _handle_gaps
-from .normalization import _normalize_data, _rolling_zscore_normalize_vectorized
+from . import regime_features
+from .normalization import _rolling_zscore_normalize_vectorized
 from .nyse_calendar import _build_nyse_valid_days
 from .sectors import (
     ETF_SECTOR_OVERRIDES,
@@ -27,7 +27,6 @@ from .sectors import (
     SECTOR_NAMES,
     _sic_to_sector,
 )
-from .splits import _apply_split_adjustments
 from .worker import _process_ticker
 
 
@@ -1854,6 +1853,21 @@ class DataFeatureEngineer:
                     pl.Series(col, scaled[:, i])
                     for i, col in enumerate(rs_cols)
                 ])
+
+        # ------------------------------------------------------------------
+        # Run-3a regime features (yield curve, credit spread, size factor,
+        # growth factor, sector rotation). Each compute_* returns the
+        # updated frame and the names of any new columns it added — the
+        # functions handle their own smoothing, z-score normalization, and
+        # delta computation, so they slot in here as opaque additions and
+        # don't disturb the existing breadth / vix-term / rs-spy delta
+        # block below.
+        # ------------------------------------------------------------------
+        stacked, _ = regime_features.compute_yield_curve(stacked, logger=self.logger)
+        stacked, _ = regime_features.compute_credit_spread(stacked, logger=self.logger)
+        stacked, _ = regime_features.compute_size_factor(stacked, logger=self.logger)
+        stacked, _ = regime_features.compute_growth_factor(stacked, logger=self.logger)
+        stacked, _ = regime_features.compute_sector_rotation(stacked, logger=self.logger)
 
         # ------------------------------------------------------------------
         # Regime momentum deltas

@@ -1,11 +1,6 @@
 import os
-import torch
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
-
-# from src.config.api_keys import MASSIVE_APIKEY
-# from src.config.database_keys import *
 
 # Keys
 load_dotenv()
@@ -222,9 +217,6 @@ SAVE_MODEL_INTERVAL = 50
 # Evaluation config
 ANNUAL_RISK_FREE_RATE = 0.02
 TRADING_DAYS_PER_YEAR = 252
-
-# Device config
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Backtest config
 BACKTEST_START_DATE = "2024-01-01"

@@ -20,6 +20,7 @@ from src.config.config import (
 )
 from src.v6.environment.environment import DailyEnvironment
 from src.v6.model.agent import Agent
+from src.v6.preprocessing.constants import SHARED_REGIME_PREFIXES
 from src.utils.logger import Logger
 from src.utils.utils import create_directory, load_stock_data, format_duration, resolve_run_number
 
@@ -29,14 +30,23 @@ from src.utils.utils import create_directory, load_stock_data, format_duration, 
 # ---------------------------------------------------------------------------
 
 class TickerData:
-    """Pre-loaded data for a single ticker, ready for environment use."""
+    """Pre-loaded data for a single ticker, ready for environment use.
+
+    `columns` is the ordered list of feature-column names corresponding
+    to the columns of `data` (i.e. the same ordering used when
+    constructing `data` from the unified parquet: market → temporal →
+    per-ticker regime → shared regime). Useful for debugging,
+    sanity-checking observations, and any code that needs to look up
+    a feature by name rather than by positional index.
+    """
     __slots__ = ('ticker', 'data', 'prices', 'timestamps',
                  'n_market', 'n_temporal', 'n_regime', 'n_bars',
-                 'first_valid_idx', 'last_valid_idx')
+                 'first_valid_idx', 'last_valid_idx', 'columns')
 
     def __init__(self, ticker: str, data: np.ndarray, prices: np.ndarray,
                  timestamps: np.ndarray, n_market: int, n_temporal: int, n_regime: int,
-                 first_valid_idx: int, last_valid_idx: int):
+                 first_valid_idx: int, last_valid_idx: int,
+                 columns: List[str]):
         self.ticker = ticker
         self.data = data
         self.prices = prices
@@ -50,6 +60,8 @@ class TickerData:
         # from the left-join in _build_unified (pre-IPO and post-delisting).
         self.first_valid_idx = first_valid_idx
         self.last_valid_idx = last_valid_idx
+        # Feature column names in the same order as `data`'s columns.
+        self.columns = columns
 
 
 # ---------------------------------------------------------------------------
@@ -1217,7 +1229,7 @@ def load_tickers_from_unified(
         if c in temporal_set:
             temporal_idx.append(idx)
             continue
-        if c.startswith(("breadth_", "vix_term_")):
+        if c.startswith(SHARED_REGIME_PREFIXES):
             shared_regime_idx.append(idx)
             continue
         if c.endswith("_close"):
@@ -1296,6 +1308,11 @@ def load_tickers_from_unified(
     n_temporal = len(temporal_idx)
     n_shared_regime = len(shared_regime_idx)
 
+    # Column names corresponding 1:1 to columns of full_arr. We use this
+    # below to record each TickerData's column names in the same order
+    # as its `data` matrix, by indexing into this list with col_idx.
+    full_arr_columns = df_numeric.columns
+
     # --- Phase 3: per-ticker assembly via numpy slicing --------------------
     result: Dict[str, TickerData] = {}
 
@@ -1328,6 +1345,8 @@ def load_tickers_from_unified(
         n_market = len(market_idx)
         n_regime = len(pt_regime_idx) + n_shared_regime
 
+        ticker_columns = [full_arr_columns[i] for i in col_idx.tolist()]
+
         result[ticker] = TickerData(
             ticker=ticker,
             data=data,
@@ -1338,6 +1357,7 @@ def load_tickers_from_unified(
             n_regime=n_regime,
             first_valid_idx=first_valid_idx,
             last_valid_idx=last_valid_idx,
+            columns=ticker_columns,
         )
 
     return result

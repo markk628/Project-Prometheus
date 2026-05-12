@@ -20,7 +20,6 @@ from src.config.config import (
     ALPHA_INIT,
     TARGET_UPDATE_INTERVAL,
     UPDATE_RATIO,
-    DEVICE,
     REPLAY_BUFFER_SIZE,
     WINDOW_SIZE,
 )
@@ -28,6 +27,8 @@ from src.v6.model.networks import Actor, Critic
 from src.v4.model.replay_buffer import IndexReplayBuffer
 from src.utils.logger import Logger
 from src.utils.utils import create_directory
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Agent:
