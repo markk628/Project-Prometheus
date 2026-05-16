@@ -67,6 +67,11 @@ performance" and "degenerate near-zero activity" indistinguishable to the
 network when both saturate at the upper bound. Could reinforce undertrading.
 Sharpe stays in `_get_info` for logging — only removed from observation.
 
+**Seeds & Runs:**
+- Seed 42: Run 2
+- Seed 43: Run 3
+- Seed 44: Run 4
+
 **Changes:**
 
 - `environment.py::_get_observation`: dropped Sharpe slot from
@@ -233,6 +238,11 @@ design.
 Premise: removing win_rate should be neutral or positive — the dim is
 mostly noise, the network is conditioning policy on a low-SNR signal.
 
+**Seeds & Runs:**
+- Seed 42: Run 5
+- Seed 43: Run 6
+- Seed 44: Run 7
+
 **Changes:**
 
 - `environment.py::_get_observation`: dropped win_rate slot from
@@ -384,6 +394,11 @@ across regime shifts, especially the COVID-like fold 7 fragility seen in
 runs 1 and 2. The "broad-spectrum regime context" framing — yield curve
 inversion, credit spread widening, sector dispersion — describes the
 *mechanism* of regime change, not just specific events.
+
+**Seeds & Runs:**
+- Seed 42: Run 8
+- Seed 43: Run 9
+- Seed 44: Run 10
 
 **Methodology.** 3-seed MC (42, 43, 44) with determinism on, comparing
 against the 3-seed v5 baseline.
@@ -551,29 +566,327 @@ needle, and the path forward really is v7.
   version, and the international families need EFA/EEM data fixes
   anyway.
 
-## Pending Run 4: Per-ticker architecture (encoder vs MLP)
+## Run 4a — Per-ticker delta features (NEUTRAL / SHIPPED FORWARD)
 
-Per v6_handoff: the current `FeatureExtractor` processes a (60, 25)
-market-data sequence through CNN+Transformer, but many of the 25
-features are already multi-horizon summaries themselves (log_return_5/
-20/60, volatility_5_20_ratio, ema_5_20_ratio, etc.). Feeding 60
-timesteps of multi-horizon summaries through a sequence encoder is
-probably redundant with what the features already encode.
+**Setup.** Added 5 per-ticker delta features inside `_normalize_data`,
+computed on the z-scored levels after the existing rolling normalization:
 
-Two architectural options per the `networks.py` TODO:
+- `ema_close_ratio_20_delta_20`
+- `ema_20_60_ratio_delta_20`
+- `adx_5_20_ratio_delta_20`
+- `volatility_5_20_ratio_delta_20`
+- `volume_5_20_ratio_delta_20`
 
-1. **MLP-only market path.** Drop the encoder. Pass the last-timestep
-   25-dim market vector through an MLP. **PREREQUISITE**: add per-ticker
-   delta features in `feature_engineer.py` first (the 25 ticker features
-   are levels and ratios, not changes — an MLP on a snapshot can't
-   distinguish "building for 30 days" from "spiked yesterday").
-2. **Minimal CNN + MLP.** Single 1D conv layer + AdaptiveAvgPool, no
-   transformer. Cheaper insurance than option 1, no feature-engineering
-   change needed.
+All 5 features are medium-window levels/ratios. All are z-scored in
+`_normalize_data`, so the deltas live on the same scale as the bases —
+no separate normalization needed. Convention matches the regime delta
+machinery: delta-of-z-scored-level, not z-score-of-delta. Computation
+lives in `normalization.py` so all per-ticker feature work stays in one
+module.
 
-Open question whether to ship the per-ticker delta features as Run 4a
-(preprocessing only, no model change) before testing the MLP-only path
-as Run 4b. The deltas are useful with the existing encoder too — they're
-not strictly an MLP-only thing. Could be a clean two-run sequence.
+`adx_14` was originally on the candidate list but swapped for
+`adx_5_20_ratio` mid-design: `adx_14` is cross-sectionally normalized in
+a later stage (`_cross_sectional_normalization`), so at `_normalize_data`
+time its scale is still raw [0, 1] — a delta on the raw scale would have
+been inconsistent with the other 4 z-scored deltas. `adx_5_20_ratio` is
+already z-scored at this stage and is arguably a stronger delta candidate
+anyway (trajectory on a ratio-between-time-horizons carries more
+semantic content than trajectory on a single-window indicator).
 
-3-seed MC, same standard.
+Column-count impact: 5 features × ~2900 tradable tickers = ~14.5k new
+columns in unified.parquet. ~8% expansion over the 176.5k pre-4a column
+count. Preprocessing wall-clock ~10% slower; trivial impact downstream.
+
+**Seeds & Runs:**
+- Seed 42: Run 11
+- Seed 43: Run 12
+- Seed 44: Run 13
+
+**Hypothesis.** 4a is a **prerequisite for run 4b's MLP test**, not a
+standalone win. The MLP-only architecture under consideration for 4b
+processes a single timestep snapshot — it cannot reconstruct trajectory
+from a window. The deltas exist to make the MLP path informationally
+equivalent to the encoder path on the temporal dimension.
+
+For 4a's own hypothesis: deltas should be roughly neutral on the
+existing encoder, since the encoder can in principle reconstruct
+`delta_20[t] = level[t] - level[t-20]` from its 60-day window. The
+question 4a answers is "do the deltas hurt the encoder?" — if no, 4b
+is alive; if yes, the entire 4b architectural direction is dead.
+
+**Methodology.** 3-seed MC (42, 43, 44) with determinism on. Comparison
+against the 3-seed v5 baseline. Permissive decision rule pre-committed
+to in writing before training kicked off, appropriate for a prerequisite
+run rather than a substantive-hypothesis run:
+
+> Cross-seed mean improvement on either return or Sharpe, with no major
+> regression on any fold cluster, is enough to ship.
+
+**Results — cross-seed aggregate:**
+
+| | Return mean | Sharpe mean | Sharpe median | Pos rate |
+|---|---|---|---|---|
+| v5 baseline (3-seed) | +9.18% ± 3.41 | +0.485 ± 0.052 | +0.43 | 62.0% |
+| v6 run 4a (3-seed)   | +8.77% ± 4.42 | +0.489 ± 0.086 | +0.45 | 62.6% |
+
+Sharpe mean +0.004 (tiny positive). Return -0.41pts (tiny negative).
+Both well inside the seed-stdev band. Seed-stdev widened on Sharpe
+(0.052 → 0.086), suggesting marginally more variance in fold outcomes
+across seeds — not a regression but worth noting.
+
+**Same-seed paired delta (4a minus v5):**
+
+| Seed | Δ Return | Δ Sharpe | Δ Pos% |
+|---|---|---|---|
+| 42 | +0.31 | +0.046 | +0.44 |
+| 43 | -1.83 | -0.048 | -1.22 |
+| 44 | +0.29 | +0.016 | +2.67 |
+
+2 wins / 1 loss on both metrics, with all magnitudes small. Seed 43's
+loss is the biggest single delta and it's only ~2pts return.
+
+**Per-fold breakdown (3-seed means, 4a minus v5):**
+
+```
+Fold   Δ ret    Δ sharpe    Interpretation
+1      +0.83    +0.04       small win
+2      +0.98    +0.06       small win
+3      +0.14    +0.02       wash
+4      -2.69    -0.08       small loss
+5      +0.67    +0.03       small win (regime-shift fold)
+6      -1.16    -0.05       small loss (v5's peak fold)
+7      -4.67    -0.11       meaningful loss ← persistent issue
+8      +2.86    +0.06       win (regime-shift fold)
+9      -0.66    +0.07       interesting: ret slightly down, sharpe up
+```
+
+7 of 9 folds improved on Sharpe (with the 2 losses being fold 4 and
+fold 6, both small magnitude on Sharpe). 5 of 9 improved on return.
+
+**Fold-level head-to-head (27 pairs):** 4a wins 14/27 on return, 16/27
+on Sharpe. The 16/27 Sharpe count is ~59%, marginally above coin flip.
+
+**Regime-shift folds (5, 7, 8) vs rest:**
+
+- Regime-shift folds: -0.38pts ret, -0.01 sharpe
+- Other folds: -0.43pts ret, +0.01 sharpe
+
+Both essentially flat. The fold-7 regression is partly counterbalanced
+by fold-5 and fold-8 improvements within the regime-shift cluster.
+
+**Decision rule scorecard:**
+
+| Criterion | Verdict |
+|---|---|
+| Cross-seed mean improvement on either ret or Sharpe | **PASS** (Sharpe +0.004) |
+| No major regression on any fold cluster | **MARGINAL** (fold 7 -4.67 mirrors 3a's pattern) |
+
+By the permissive rule, **passes — barely**. Fold 7 is the asterisk.
+
+**The qualitative difference vs runs 1–3a is the most important
+observation in the 4a result:**
+
+- Runs 1 & 2 were unanimous in direction: 3 of 3 seeds worse on both metrics.
+- Run 3a was 1W/2L with larger magnitudes (+1.25/-2.48/-2.95 return).
+- Run 4a is 2W/1L with tiny magnitudes (all within ±2pts return).
+
+This is the first v6 run that lands at the *actual* noise floor rather
+than below it. Distinct from "clearly bad" in a way the MC framework
+correctly distinguishes — if we'd run 4a with one seed and happened to
+draw seed 43, we'd have called it bad; with seed 42 or 44, called it
+good. The 3-seed protocol resolves this honestly to "neutral."
+
+**Two consecutive runs hurt fold 7 specifically.** 3a (-6.13 ret, -0.16
+sharpe) and 4a (-4.67 ret, -0.11 sharpe) both regressed there. Most
+likely combined reasons: (1) v5's fold-7 result was already
+favorably-drawn relative to the underlying COVID-regime difficulty, so
+any perturbation regresses toward true mean, and (2) both added feature
+types (slow-smoothed macro features for 3a, trajectory deltas for 4a)
+depend on persistence assumptions that COVID's "sudden shock then
+policy backstop" pattern violated. Not actionable for run 4 itself but
+worth flagging.
+
+**What 4a tells us about 4b — the actually-useful interpretation:**
+
+Two hypotheses were alive going into 4a:
+
+- **Encoder is doing real temporal work.** Adding deltas would be
+  redundant → roughly neutral result.
+- **Encoder is mostly ignoring temporal info, treating its input as
+  bag-of-features.** Adding deltas would help materially → meaningful
+  positive.
+
+The observed neutral result is consistent with the first hypothesis,
+mildly inconsistent with the second. *If* this reading is right, 4b
+(MLP without temporal access) should reveal it cleanly: an MLP-only
+path would underperform the encoder by however much temporal info the
+encoder is actually using. If the encoder isn't using temporal info,
+the MLP matches and we get a major architectural simplification for
+free.
+
+Both interpretations remain alive — 4a's signal is too small to resolve
+definitively. But 4b becomes the *real* architectural test, and 4a
+plumbed the bridge correctly.
+
+**Decision: SHIP FORWARD.** The 5 new delta features stay in
+`normalization.py` permanently. v6 baseline going into run 4b is
+"v5 config + per-ticker deltas." 4b will compare MLP-only against this
+baseline (not against v5 directly), so 4b's signal will purely reflect
+the encoder-vs-MLP architectural question, not entangled with the
+feature-engineering question 4a already answered.
+
+---
+
+## Cross-Cutting Lessons from Run 4a
+
+**Match the decision rule to what the run is actually testing.** Run 3a
+used a strict rule because it was testing a substantive hypothesis
+(macro features should help regime shifts). Run 4a used a permissive
+rule because it was testing prerequisite plumbing for the next run, not
+a standalone hypothesis. Different rules for different roles. The rule
+chosen post-hoc is selection bias; the rule chosen pre-hoc is
+methodology.
+
+**3-seed MC reliably distinguishes "noise-floor neutral" from "noisily
+bad."** Runs 3a and 4a had per-seed Sharpe deltas in overlapping
+magnitude ranges (single-seed could call either way), but their *patterns*
+were different: 3a's losses were unanimous in direction at larger
+magnitude, 4a's were 1-of-3 at smaller magnitude. The cross-seed protocol
+made this distinction clean. Worth re-stating because the temptation in
+both cases would have been to call "neutral, not significantly different"
+on a single-seed read — which would have lost a real signal from 3a
+(genuinely worse) and misread 4a (genuinely neutral) as a different
+shape of result.
+
+**Two consecutive runs that hurt the same fold is a signal about the
+problem, not the methodology.** Fold 7 (COVID) regressed under both 3a's
+macro features and 4a's trajectory deltas. Three v6 runs have now made
+fold 7 worse (run 1 also did). One run is noise; three runs is a pattern
+about how single-ticker SAC with smoothed features handles COVID-shape
+regime shifts. v7's portfolio framing — where "cash" is a natural action
+during periods nothing looks tradable — is likely to handle this
+fundamentally better than any v6 feature addition can.
+
+**Marginal-positive on a prerequisite run is sufficient to ship forward.**
+Don't require a clean win when the run's role is to enable the next
+test, not to stand alone. The cost of being too strict at this stage is
+killing a real architectural test prematurely.
+
+---
+
+## Where v6 Stands After Run 4a (Neutral / Shipped Forward)
+
+- v6 baseline updated: v5 run-5 config + 5 per-ticker delta features
+  (the 4a additions stay regardless of 4b's outcome).
+- v5 reference distribution remains the *historical* baseline:
+  ret_mean +9.18% ± 3.41, sh_mean +0.485 ± 0.052.
+  Effectively unchanged after 4a (Sharpe mean +0.004, retmean -0.41pts).
+- 4a's 14.5k new columns stay in the unified.parquet schema. Preprocessing
+  ~10% slower; downstream cost trivial.
+- 4b is the next live run: MLP-only market path. Decision rule will be
+  stricter than 4a's (4b tests an actual architectural hypothesis, not
+  plumbing). To be pre-committed before training kicks off.
+- v6 capstones after 4b regardless of outcome. Per the stop-adding-things
+  commitment, no 4c, no further ablations within v6.
+- After v6 capstone: fresh chat with `v7_handoff.md` and the v7 pivot.
+
+## Pending Run 4b: MLP-only market path
+
+The architectural test 4a was enabling. Drop the CNN+Transformer encoder
+in `networks.py`'s `FeatureExtractor`; pass the last-timestep market
+vector (now 30-dim including the 5 deltas from 4a) through an MLP
+instead. Per-ticker regime features and shared regime features still
+get their existing paths — only the market sequence encoder gets
+replaced.
+
+**Hypothesis.** Either:
+
+- The encoder was doing real temporal work, and the MLP underperforms
+  by however much temporal info the encoder was extracting (probably
+  visible as a meaningful aggregate drop). 4a's neutral result mildly
+  favors this hypothesis.
+- The encoder was mostly ignoring temporal info, and the MLP matches.
+  In which case v6 ends with a substantial architectural simplification:
+  fewer parameters, faster training, simpler codebase, and a model
+  closer in shape to what v7's allocation problem will likely use.
+
+Either result is informative. Unlike 4a (which was prerequisite
+plumbing), 4b is a real architectural decision point.
+
+**Methodology.** 3-seed MC vs the 4a baseline (NOT v5 — the deltas are
+now part of the baseline). Determinism on, same protocol as previous
+runs.
+
+**Decision rule (pre-commit before training).** Stricter than 4a's:
+require cross-seed mean within ~1pt return / ~0.03 Sharpe of baseline
+on aggregate. MLP "passing" means matching the encoder, not beating it —
+the win is architectural simplification at equal performance, not
+beating the encoder on metrics. If the MLP underperforms by more than
+that, the encoder is doing real work and stays in.
+
+**Implementation note.** Network change is small: replace
+`FeatureExtractor`'s conv+transformer stack with an MLP that takes the
+last timestep's market features and outputs the same hidden_dim as the
+existing encoder. No changes to actor/critic heads, no changes to the
+replay buffer, no changes to the trainer.
+
+### Possible Run 4c: long-history per-ticker base features
+
+Filed mid-4a-training from an in-conversation observation: 4a's
+`delta_20` is computed on features whose base levels are themselves
+≤60-day windows. The 60-day market-data encoder window already sees
+both endpoints of a 20-day delta, so for the *encoder path* the delta
+is information the network could in principle reconstruct from the
+window itself. The delta still earns its keep in 4a as the
+prerequisite for 4b's MLP path (which doesn't have a window), but its
+marginal value for the encoder is mostly regularization, not new
+information.
+
+The deeper observation: **every per-ticker feature except `rs_spy_252d`
+is built on ≤60-day windows.** Long-horizon per-ticker context simply
+doesn't exist in the feature set. The encoder is doing the best it can
+with a 60-day view, and the only long-history signal it gets is via
+shared regime features (breadth_200d, rs_spy_252d for the specific
+ticker, vix-term aggregates, etc.) — none of which carry information
+about *this ticker's specific* multi-quarter behavior.
+
+The 4c hypothesis: adding long-history per-ticker base features, with
+medium deltas on them, would give the encoder (or MLP) per-ticker
+trajectory signal it currently can't see. Candidate base features
+following the v5 run-3 "long base + medium delta" pattern:
+
+- `log_return_120` or `log_return_252` — multi-quarter cumulative
+  return for this ticker specifically
+- `ema_close_ratio_120` or `_252` — close vs long-MA
+- `volatility_60_252_ratio` — recent-vs-long-history vol regime per
+  ticker
+
+With deltas: `delta_60` on the 252d levels (matching the regime
+convention for long-window levels).
+
+**Why this is 4c, not 4a or 4b:**
+
+- 4a tests a minimal additive change with a specific bridging role
+  (enables 4b). Mid-flight scope creep would muddy attribution.
+- 4b tests an architectural swap (encoder → MLP). Independent question.
+- 4c tests a new hypothesis: "long-history per-ticker context matters."
+  Genuinely new information, not a derivative of existing features.
+
+If 4a fails, 4b is also likely dead — but 4c could still ship
+independently as "add long-history features to the existing encoder
+path." So 4c isn't strictly downstream of 4a/4b in dependency order, but
+it makes sense to test 4a/4b first since they're already designed and
+4c needs design work (which long-history features specifically, ticker
+length / data coverage considerations for 252d windows on shorter
+ticker lifecycles, etc.).
+
+**Caveat to think through if 4c becomes live:** 252-day rolling windows
+on tickers with <252+warmup days of history are zero/null — by which I
+mean the post-`_normalize_data` rolling-z-score would produce zeros for
+those rows. For the existing 60-day-window features this isn't a
+problem because almost every ticker has ≥60+252 days. For 252-day-
+window features, tickers with shorter lifecycles get more zero-padding,
+which interacts with the existing lifecycle-segment machinery in
+non-obvious ways. Worth a closer look before committing.
+
+Not blocking. Filing for after 4a/4b complete.

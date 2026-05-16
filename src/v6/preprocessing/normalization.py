@@ -139,10 +139,59 @@ def _normalize_data(
     full_arr = df.select(features_to_scale).to_numpy().astype(np.float64)
     scaled = _rolling_zscore_normalize_vectorized(full_arr, window=NORMALIZATION_WINDOW)
 
-    return df.with_columns([
+    df = df.with_columns([
         pl.Series(col, scaled[:, i])
         for i, col in enumerate(features_to_scale)
     ])
+
+    # ------------------------------------------------------------------
+    # Per-ticker level deltas (v6 run 4a).
+    #
+    # Adds a single 20-bar delta on a hand-picked subset of medium-window
+    # level/ratio features. Computed AFTER z-score normalization, so the
+    # delta is "change in z-scored level over the last 20 bars" — matches
+    # the regime-deltas convention used elsewhere in the pipeline (delta-
+    # of-z-score, not z-score-of-delta).
+    #
+    # Hypothesis: an MLP-style read of per-ticker state needs explicit
+    # trajectory info because the levels are snapshots. Adding deltas
+    # here also gives the existing CNN+Transformer encoder a more direct
+    # trajectory signal, so the test isn't purely "what would help if we
+    # drop the encoder."
+    #
+    # Features included:
+    #   ema_close_ratio_20      - close vs 20d EMA, medium-window trend
+    #   ema_20_60_ratio         - 20d vs 60d EMA, trend regime ratio
+    #   adx_5_20_ratio          - short vs medium ADX, trend-strength shift
+    #   volatility_5_20_ratio   - short vs medium vol, vol regime ratio
+    #   volume_5_20_ratio       - short vs medium volume, participation shift
+    #
+    # All 5 are z-scored above in `features_to_scale`; their deltas
+    # therefore live on the same scale and don't need a separate
+    # normalization pass. adx_14 deliberately excluded — it's CS-
+    # normalized in a later stage, so its level is still raw [0,1] here
+    # and a delta would be on a different scale than the rest.
+    # ------------------------------------------------------------------
+    DELTA_FEATURES = [
+        "ema_close_ratio_20",
+        "ema_20_60_ratio",
+        "adx_5_20_ratio",
+        "volatility_5_20_ratio",
+        "volume_5_20_ratio",
+    ]
+    DELTA_WINDOW = 20
+
+    if log:
+        print(f"Adding {len(DELTA_FEATURES)} per-ticker delta features "
+              f"(delta_{DELTA_WINDOW} on z-scored levels)...")
+
+    df = df.with_columns([
+        pl.col(col).diff(n=DELTA_WINDOW).fill_null(0.0)
+            .alias(f"{col}_delta_{DELTA_WINDOW}")
+        for col in DELTA_FEATURES
+    ])
+
+    return df
 
 
 def _prefix_columns(df: pl.DataFrame, ticker: str) -> pl.DataFrame:
