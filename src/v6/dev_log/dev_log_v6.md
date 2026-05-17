@@ -9,6 +9,104 @@ For the v5 history see `dev_log_v5.md`. For the original v6 plan see
 
 ---
 
+## Correction — fold-year mapping (added retroactively)
+
+Earlier writeups in this log (runs 1, 3a, 4a, plus the cross-cutting lessons
+that synthesized them) referred to "fold 7" as the COVID fold. **This was
+wrong.** The correct fold-year mapping from the trainer's walk-forward
+schedule is:
+
+```
+Fold 1: Valid 2015    Fold 4: Valid 2018    Fold 7: Valid 2021
+Fold 2: Valid 2016    Fold 5: Valid 2019    Fold 8: Valid 2022
+Fold 3: Valid 2017    Fold 6: Valid 2020    Fold 9: Valid 2023
+```
+
+So COVID is **fold 6**, not fold 7. Fold 7 is the 2021 post-COVID melt-up
+(meme stocks, retail flows, peak ZIRP) — historically the *easiest* year
+for buy-and-hold equity strategies, not a regime-stress year.
+
+This changes what the recurring fold-7 regression across v6 runs actually
+means:
+
+- The numerical observation is unchanged: runs 1, 3a, and 4a all hurt
+  fold 7 specifically. That happened, and the data tables in those
+  writeups are correct.
+- The *interpretation* in those writeups attributed the fold-7 regression
+  to "COVID handling" or "regime-shift fold," using the wrong mapping.
+  Those interpretations are wrong as written.
+- An earlier version of this correction proposed "trailing-vol features
+  stay elevated, model goes conservative, underperforms melt-up" as the
+  mechanism. That interpretation is also wrong on closer inspection.
+  See below.
+
+**Actual diagnosis (revised after closer look at fold 6 vs fold 7):**
+
+2020 was a +18% calendar year for SPY — a Q1 crash followed by an
+8-month melt-up driven by Fed intervention and retail flows. The "story-
+driven slow melt-up" dynamic I was tagging as 2021-specific actually
+started in Q2 2020. So fold 6's validation period (full year 2020) and
+fold 7's validation period (full year 2021) overlap substantially in
+character. The "2021 is qualitatively novel" framing doesn't work — most
+of 2020 post-crash already had 2021-like dynamics.
+
+The fold 6 vs fold 7 puzzle: fold 6 is the **best** fold across most v6
+runs (sometimes Sharpe > 1.0), fold 7 is the **worst**. If both folds
+had qualitatively similar validation dynamics, the cause must be
+something other than the validation periods themselves.
+
+The likely answer is **recency emphasis in the replay buffer**. The
+`IndexReplayBuffer` uses `decay=3.0` recent-emphasis sampling: ~60% of
+gradient updates come from the newest third of stored transitions, ~10%
+from the oldest. This means each fold's policy is disproportionately
+shaped by whatever happens to be the most recent training years.
+
+- Fold 6 model: training ends Dec 2019. Buffer's recent third is roughly
+  2017-2019 — the low-vol melt-up era, calm bull market. Policy is
+  trained on tranquility. Deployed into 2020 (which is, weighted by
+  duration, mostly a continuation of the same melt-up after a brief
+  5-week interruption), the policy works because the year is structurally
+  "calm bull with brief interruption" — exactly what the policy is
+  calibrated for.
+- Fold 7 model: training ends Dec 2020. Buffer's recent third is roughly
+  2018-2020 — Q4 2018 selloff, all of 2019, COVID crash and recovery.
+  The most-weighted recent training is the 2020 chaos period. Policy
+  has learned chaos-response reflexes: elevated-vol regime detection,
+  sharp directional moves, V-shape recovery dynamics. Deployed into
+  2021's slower, steadier melt-up, those reflexes don't match what the
+  environment rewards.
+
+This is a much cleaner explanation than feature-induced conservatism:
+- Consistent with fold 6 being the *best* (calm training → bull deployment)
+- Consistent with fold 7 being the *worst* (chaos training → calm-bull deployment)
+- Consistent with fold 8 (2022 bear) not being unusually bad — chaos-
+  trained reflexes transfer reasonably to actual chaos
+- Consistent with the three runs that hurt fold 7 (1, 3a, 4a) all having
+  in common that they added input dimensions where the 2020-vs-2021
+  mismatch had more room to manifest
+
+**Adding features didn't cause fold 7's problem; it amplified an
+existing mismatch between the policy's recent-training regime and fold
+7's deployment regime.**
+
+The actual regime-stress folds are 4 (2018 Q4 selloff), 6 (COVID), and
+8 (2022 rate-hike bear) — not 5, 7, 8 as several writeups below claim.
+
+Where the original writeups are misleading because of the wrong mapping,
+this section flags it. Specific interpretive claims that depend on the
+wrong mapping (e.g. "macro features can't catch COVID-shape regime"
+in run 3a's diagnosis) should be read with this correction in mind.
+
+The downstream takeaway for v7 is unchanged but for a sharper reason:
+v7's portfolio allocation framing handles "any environment where being
+defensive is correct" without needing the policy to predict the next
+year. AND — separately — v7 should revisit whether `decay=3.0` is the
+right recency emphasis for a 5-ticker fixed-basket setup, since the
+buffer dynamics will be very different from v6's thousands-of-tickers
+sampling. Filed in `v7_handoff.md` as a v7 design consideration.
+
+---
+
 ## Determinism Hardening (pre-run-1 infrastructure)
 
 Originally on the v6_handoff list as a "do alongside" item. Pulled forward
@@ -98,6 +196,10 @@ Genuinely ambiguous. Mean Sharpe slightly up, median Sharpe up more
 clearly, but return mean down and std up. Single fold (fold 7, COVID) was
 doing all the work in the negative direction — v5 fold 7 mean = -3.18%, v6
 fold 7 mean = -16.84%. Excluding fold 7, v6 was unambiguously better
+[NOTE: this paragraph used wrong fold-year mapping — fold 7 is 2021
+post-COVID melt-up, NOT COVID. See "Correction — fold-year mapping" at
+top of file. The numerical observations are correct; the "COVID handling"
+interpretation is wrong.]
 across the rest. Two competing readings:
 
 1. **Signal:** Sharpe-in-obs was acting as a stability anchor through
@@ -389,7 +491,7 @@ from `TickerData.data` on the first attempted run. Found via the new
 shape was 92 instead of 110). Fix: unified prefix list in
 `constants.SHARED_REGIME_PREFIXES`, imported by both auditor and trainer.
 
-**Hypothesis.** Adding macro regime context should help generalization
+**Hypothesis:** Adding macro regime context should help generalization
 across regime shifts, especially the COVID-like fold 7 fragility seen in
 runs 1 and 2. The "broad-spectrum regime context" framing — yield curve
 inversion, credit spread widening, sector dispersion — describes the
@@ -455,6 +557,16 @@ designed to test the hypothesis "macro regime context helps regime
 shifts," and fold 7 (COVID) is the canonical regime-shift fold. 3a made
 fold 7 *worse*: -6.13 pts return, -0.16 Sharpe, consistent across all 3
 seeds. The hypothesis got falsified.
+
+[NOTE: this writeup used the wrong fold-year mapping. Fold 7 is 2021
+post-COVID melt-up, not COVID. The "macro features can't catch COVID"
+mechanism described below is wrong as written. The likely actual
+mechanism is that the replay buffer's recency emphasis (decay=3.0)
+weights 2020 chaos disproportionately at fold 7's training end, giving
+the policy chaos-response reflexes that don't match 2021's slower
+melt-up dynamics. Adding features amplifies the mismatch by giving
+that miscalibration more dimensions to manifest in. See "Correction —
+fold-year mapping" at top of file.]
 
 **The fold 5/8 vs fold 7 split is informative.** Folds 5 and 8 (other
 regime-shift folds) *did* improve with macro features, by 2-3pts return.
@@ -597,12 +709,7 @@ Column-count impact: 5 features × ~2900 tradable tickers = ~14.5k new
 columns in unified.parquet. ~8% expansion over the 176.5k pre-4a column
 count. Preprocessing wall-clock ~10% slower; trivial impact downstream.
 
-**Seeds & Runs:**
-- Seed 42: Run 11
-- Seed 43: Run 12
-- Seed 44: Run 13
-
-**Hypothesis.** 4a is a **prerequisite for run 4b's MLP test**, not a
+**Hypothesis:** 4a is a **prerequisite for run 4b's MLP test**, not a
 standalone win. The MLP-only architecture under consideration for 4b
 processes a single timestep snapshot — it cannot reconstruct trajectory
 from a window. The deltas exist to make the MLP path informationally
@@ -613,6 +720,11 @@ existing encoder, since the encoder can in principle reconstruct
 `delta_20[t] = level[t] - level[t-20]` from its 60-day window. The
 question 4a answers is "do the deltas hurt the encoder?" — if no, 4b
 is alive; if yes, the entire 4b architectural direction is dead.
+
+**Seeds & Runs:**
+- Seed 42: Run 11
+- Seed 43: Run 12
+- Seed 44: Run 13
 
 **Methodology.** 3-seed MC (42, 43, 44) with determinism on. Comparison
 against the 3-seed v5 baseline. Permissive decision rule pre-committed
@@ -767,6 +879,18 @@ regime shifts. v7's portfolio framing — where "cash" is a natural action
 during periods nothing looks tradable — is likely to handle this
 fundamentally better than any v6 feature addition can.
 
+[NOTE: writeup-time interpretation used wrong fold-year mapping. The
+recurring fold-7 regression is real but is the 2021 post-COVID melt-up,
+not COVID itself. Corrected mechanism: the replay buffer's recency
+emphasis (decay=3.0) weights 2020 chaos disproportionately at fold 7's
+training end. The policy learns chaos-response reflexes that don't
+match 2021's slower melt-up dynamics. Adding features (3a, 4a) didn't
+cause this; it amplified an existing mismatch between the policy's
+recent-training regime and fold 7's deployment regime. The "v7 cash as
+natural action" conclusion still holds, plus a new v7 design
+consideration: revisit recency-emphasis `decay` for the 5-ticker
+basket. See "Correction — fold-year mapping" at top of file.]
+
 **Marginal-positive on a prerequisite run is sufficient to ship forward.**
 Don't require a clean win when the run's role is to enable the next
 test, not to stand alone. The cost of being too strict at this stage is
@@ -812,6 +936,11 @@ replaced.
 
 Either result is informative. Unlike 4a (which was prerequisite
 plumbing), 4b is a real architectural decision point.
+
+**Seeds & Runs:**
+- Seed 42: Run 14
+- Seed 43: Run 15
+- Seed 44: Run 16
 
 **Methodology.** 3-seed MC vs the 4a baseline (NOT v5 — the deltas are
 now part of the baseline). Determinism on, same protocol as previous

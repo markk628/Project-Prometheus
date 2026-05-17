@@ -1,41 +1,33 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# TODO — architecture experiments worth trying once a baseline run exists
+# v6 run 4b: MLP-only market path
 #
-# The current FeatureExtractor processes a (60, 25) market-data sequence, but
-# many of those 25 features are already multi-horizon summaries themselves —
-# log_return_5/20/60, volatility_5_20_ratio, ema_5_20_ratio, adx_5_20_ratio,
-# volume_5_20_ratio, and so on. Feeding 60 timesteps of multi-horizon
-# summaries through a sequence encoder is probably redundant with what the
-# features already encode.
+# The 4a run added per-ticker delta features (ema_close_ratio_20_delta_20,
+# ema_20_60_ratio_delta_20, adx_5_20_ratio_delta_20, volatility_5_20_ratio_
+# delta_20, volume_5_20_ratio_delta_20) inside _normalize_data. Result was
+# neutral vs v5 baseline — encoder tolerated the additions without much
+# benefit, consistent with the encoder using temporal info already (or
+# alternatively with the encoder mostly ignoring it). 4b tests the
+# discriminating question: does the encoder actually need to see the
+# 60-day window, or is a last-timestep snapshot enough?
 #
-# Two options to try once a baseline is established:
+# Implementation: replace the CNN+Transformer body with a 3-layer MLP that
+# operates on market_data[:, -1, :] (the most recent bar). Keep the same
+# input contract (B, W, F) so the env / replay buffer / trainer don't need
+# changes — the window is computed and stored as before, the network just
+# ignores all timesteps except the last. Output dim stays at 128 (== the
+# encoder's 2 * d_model with default args) so the downstream Actor/Critic
+# fusion path is byte-identical to 4a's.
 #
-# 1) MLP-only market path (most aggressive).
-#    Drop the encoder. Pass the last-timestep 25-dim market vector through an
-#    MLP, the same way regime features are handled today.
+# Decision rule (pre-committed before training):
+#   - Cross-seed mean within ~1pt return / ~0.03 Sharpe of the 4a baseline
+#     on aggregate -> MLP passes, ships as the v6 capstone architecture.
+#   - Underperform by more than that -> encoder is doing real temporal work
+#     and stays in. Revert to 4a by git revert of this commit.
 #
-#    PREREQUISITE — add delta features in feature_engineer.py first.
-#    The regime MLP works on a last-timestep snapshot because its features
-#    already include explicit deltas (breadth_*_delta_1/5/20,
-#    vix_term_*_delta_1/5/20), so the snapshot carries trajectory info. The
-#    25 ticker features do NOT have this — they're levels and ratios, not
-#    changes. An MLP seeing `adx_14 = 25` can't distinguish "building for
-#    30 days" from "spiked yesterday". For the symmetry to hold, add e.g.
-#    volatility_5_20_ratio_delta_5, adx_14_delta_5, ema_close_ratio_20_delta_5
-#    before removing the encoder. Without deltas, this option strictly
-#    reduces the information reaching the policy vs. the current encoder.
-#
-# 2) Minimal CNN + MLP (middle ground, cheap insurance).
-#    Single 1D conv layer (kernel=3, ~32 channels) + AdaptiveAvgPool -> 32-dim,
-#    no transformer. Captures local cross-feature patterns (e.g. volatility
-#    rising while volume-price corr flips sign) without the cost of the full
-#    hybrid. Roughly ~3k encoder params vs ~90k for the current simplified
-#    version. No feature-engineering changes needed.
-#
-# Empirical question which lands where. Run the current architecture as
-# baseline; then compare. If option 1 (with deltas added) matches baseline
-# validation, simplicity wins. If there's a clear gap, the CNN is earning
-# its keep.
+# The "win condition" here is matching the encoder, not beating it. The
+# value of MLP-passing is architectural simplification: ~40% the encoder's
+# parameter count, faster training, simpler codebase, and a shape closer
+# to what v7's portfolio-allocation problem will likely want.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -50,20 +42,29 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class FeatureExtractor(nn.Module):
     """
-    Hybrid CNN + Transformer encoder for daily market data.
+    MLP-only market encoder for daily market data (v6 run 4b).
 
-    Operates on (B, W, F) where W is the lookback window in trading days
-    (typically 60) and F is the number of per-ticker market features
-    (~45: returns, volatility, trend, volume, candlestick).
+    Takes a (B, W, F) market-data window for API compatibility with the
+    rest of the pipeline, but only uses the most recent bar (the last
+    timestep along the time axis). The per-ticker delta features added
+    in run 4a give the snapshot the trajectory info that an MLP would
+    otherwise lack.
 
-    CNN branch   → 2 conv layers over the time axis. Captures local
-                   3-5 day patterns (short-term momentum, micro-reversals).
-    Transformer  → 1 encoder layer with positional embedding. Captures
-                   longer-range dependencies across the full window.
+    The constructor accepts the same arguments as the previous
+    CNN+Transformer version so callers (Actor, Critic) need no changes.
+    The unused arguments (`n_heads`, `n_transformer_layers`, `dropout`)
+    are kept in the signature for backwards compatibility with the call
+    sites; only `feature_dim` and `d_model` actually influence behavior.
 
-    Temporal (sin/cos) and regime features bypass this encoder and enter
-    the fusion layer directly — they're already compact and don't benefit
-    from sequential modeling at this timescale.
+    Architecture:
+        last-timestep slice (B, F)
+            → Linear(F, 128) + LayerNorm + GELU
+            → Linear(128, 128) + LayerNorm + GELU
+            → Linear(128, 128) + LayerNorm + GELU
+        → (B, 128)
+
+    Output dim is fixed at `2 * d_model` to match the previous encoder's
+    contract (CNN d_model + Transformer d_model concatenated).
     """
 
     def __init__(
@@ -76,68 +77,44 @@ class FeatureExtractor(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.d_model = d_model
+        # window_size, n_heads, n_transformer_layers, dropout retained in
+        # signature for caller compatibility but unused. The MLP only sees
+        # one timestep regardless of window_size.
+        del n_heads, n_transformer_layers, dropout
+
         self.window_size = window_size
+        self.d_model = d_model
+        # Match the previous encoder's out_dim (CNN d_model + Transformer
+        # d_model) so the Actor/Critic fusion math doesn't change.
+        self.out_dim = 2 * d_model
 
-        # ── CNN branch ───────────────────────────────────────────────────
-        self.cnn = nn.Sequential(
-            nn.Conv1d(feature_dim, d_model, kernel_size=3, padding=1),
+        hidden = self.out_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
-            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+            nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.cnn_out_dim = d_model
-
-        # ── Transformer branch ───────────────────────────────────────────
-        self.tf_proj = nn.Sequential(
-            nn.Linear(feature_dim, d_model),
-            nn.LayerNorm(d_model),
+            nn.Linear(hidden, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
         )
-        self.pos_embedding = nn.Parameter(
-            torch.randn(1, window_size, d_model) * 0.02
-        )
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=n_transformer_layers,
-            enable_nested_tensor=False,
-        )
-        self.transformer_norm = nn.LayerNorm(d_model)
-        self.transformer_out_dim = d_model
-
-        self.out_dim = self.cnn_out_dim + self.transformer_out_dim
 
     def forward(self, market_data: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            market_data: (B, W, F)
+            market_data: (B, W, F). Only the last timestep along W is used.
         Returns:
-            (B, out_dim) — concat of CNN + Transformer features
+            (B, out_dim) — MLP encoding of the most recent bar's features.
         """
         if market_data.dim() == 2:
             market_data = market_data.unsqueeze(0)
 
-        # CNN branch
-        cnn_in = market_data.permute(0, 2, 1)              # (B, F, W)
-        cnn_out = self.cnn(cnn_in).squeeze(-1)             # (B, d_model)
-
-        # Transformer branch
-        tf_in = self.tf_proj(market_data)
-        tf_in = tf_in + self.pos_embedding[:, :tf_in.size(1), :]
-        tf_out = self.transformer(tf_in)
-        tf_out = self.transformer_norm(tf_out.mean(dim=1))  # (B, d_model)
-
-        return torch.cat([cnn_out, tf_out], dim=1)
+        # Take the most recent bar. Per-ticker deltas added in 4a carry
+        # the trajectory info the rest of the window would have provided.
+        last_bar = market_data[:, -1, :]                # (B, F)
+        return self.mlp(last_bar)                       # (B, out_dim)
 
 
 class Actor(nn.Module):
