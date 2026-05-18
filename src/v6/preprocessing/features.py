@@ -152,18 +152,27 @@ def _add_volatility_features(df: pl.DataFrame, log: bool = False) -> pl.DataFram
     log_return_20[:20] = np.nan
     log_return_60 = np.log(close / np.roll(close, 60))
     log_return_60[:60] = np.nan
+    # Long-horizon cumulative returns (v6 run 4c).
+    log_return_120 = np.log(close / np.roll(close, 120))
+    log_return_120[:120] = np.nan
+    log_return_252 = np.log(close / np.roll(close, 252))
+    log_return_252[:252] = np.nan
 
     vol_5d = ta.STDDEV(close, timeperiod=5)
     vol_20d = ta.STDDEV(close, timeperiod=20)
     vol_60d = ta.STDDEV(close, timeperiod=60)
+    vol_252d = ta.STDDEV(close, timeperiod=252)
     eps = 1e-8
-    
+
     df = df.with_columns([
-        pl.Series("log_return_5",           log_return_5),
-        pl.Series("log_return_20",          log_return_20),
-        pl.Series("log_return_60",          log_return_60),
-        pl.Series("volatility_5_20_ratio",  np.log((vol_5d + eps) / (vol_20d + eps))),
-        pl.Series("volatility_20_60_ratio", np.log((vol_20d + eps) / (vol_60d + eps)))
+        pl.Series("log_return_5",            log_return_5),
+        pl.Series("log_return_20",           log_return_20),
+        pl.Series("log_return_60",           log_return_60),
+        pl.Series("log_return_120",          log_return_120),
+        pl.Series("log_return_252",          log_return_252),
+        pl.Series("volatility_5_20_ratio",   np.log((vol_5d + eps) / (vol_20d + eps))),
+        pl.Series("volatility_20_60_ratio",  np.log((vol_20d + eps) / (vol_60d + eps))),
+        pl.Series("volatility_60_252_ratio", np.log((vol_60d + eps) / (vol_252d + eps))),
     ])
     
     volatility_features.extend([feature for feature in df.columns if feature not in original_features])
@@ -180,23 +189,28 @@ def _add_trend_features(df: pl.DataFrame, log: bool = False) -> pl.DataFrame:
     high  = _talib_series(df, "high")
     low   = _talib_series(df, "low")
     
-    ema_5d = ta.EMA(close, timeperiod=5)
-    ema_20d = ta.EMA(close, timeperiod=20)
-    ema_60d = ta.EMA(close, timeperiod=60)
-    adx_5 = ta.ADX(high, low, close, timeperiod=5) / 100.0
+    ema_5d   = ta.EMA(close, timeperiod=5)
+    ema_20d  = ta.EMA(close, timeperiod=20)
+    ema_60d  = ta.EMA(close, timeperiod=60)
+    # Long-horizon EMAs (v6 run 4c).
+    ema_120d = ta.EMA(close, timeperiod=120)
+    ema_252d = ta.EMA(close, timeperiod=252)
+    adx_5  = ta.ADX(high, low, close, timeperiod=5) / 100.0
     adx_20 = ta.ADX(high, low, close, timeperiod=20) / 100.0
     adx_60 = ta.ADX(high, low, close, timeperiod=60) / 100.0
     eps = 1e-8
 
-    df =  df.with_columns([
-        pl.Series("ema_close_ratio_5",  np.log((close + eps) / (ema_5d + eps))),
-        pl.Series("ema_close_ratio_20", np.log((close + eps) / (ema_20d + eps))),
-        pl.Series("ema_close_ratio_60", np.log((close + eps) / (ema_60d + eps))),
-        pl.Series("ema_5_20_ratio",     np.log((ema_5d + eps) / (ema_20d + eps))),
-        pl.Series("ema_20_60_ratio",    np.log((ema_20d + eps) / (ema_60d + eps))),
-        pl.Series("adx_5_20_ratio",     np.log((adx_5 + eps) / (adx_20 + eps))),
-        pl.Series("adx_20_60_ratio",    np.log((adx_20 + eps) / (adx_60 + eps))),
-        pl.Series("adx_14",             ta.ADX(high, low, close, timeperiod=14) / 100.0),
+    df = df.with_columns([
+        pl.Series("ema_close_ratio_5",   np.log((close   + eps) / (ema_5d   + eps))),
+        pl.Series("ema_close_ratio_20",  np.log((close   + eps) / (ema_20d  + eps))),
+        pl.Series("ema_close_ratio_60",  np.log((close   + eps) / (ema_60d  + eps))),
+        pl.Series("ema_close_ratio_120", np.log((close   + eps) / (ema_120d + eps))),
+        pl.Series("ema_close_ratio_252", np.log((close   + eps) / (ema_252d + eps))),
+        pl.Series("ema_5_20_ratio",      np.log((ema_5d  + eps) / (ema_20d  + eps))),
+        pl.Series("ema_20_60_ratio",     np.log((ema_20d + eps) / (ema_60d  + eps))),
+        pl.Series("adx_5_20_ratio",      np.log((adx_5   + eps) / (adx_20   + eps))),
+        pl.Series("adx_20_60_ratio",     np.log((adx_20  + eps) / (adx_60   + eps))),
+        pl.Series("adx_14",              ta.ADX(high, low, close, timeperiod=14) / 100.0),
     ])
     
     trend_features.extend([feature for feature in df.columns if feature not in original_features])

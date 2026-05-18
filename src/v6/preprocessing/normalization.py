@@ -126,6 +126,17 @@ def _normalize_data(
         "avg_trade_size_ratio", "range_per_trade_ratio", "trade_intensity_ratio",
         # Candlestick (bounded [0,1] but rolling z-score captures "unusual vs recent history")
         "upper_wick_ratio", "lower_wick_ratio",
+        # Long-horizon per-ticker features (v6 run 4c).
+        #
+        # Per-ticker z-scored here rather than CS-normalized later (where
+        # log_return_5/20/60 live) because cross-sectional comparison at the
+        # 120-252 day horizon is already captured by rs_spy_252d + its deltas.
+        # Per-ticker z-score answers a different question: "is this stock's
+        # 120/252-day behavior unusual relative to its own history" —
+        # genuinely new info vs. the existing feature set.
+        "ema_close_ratio_120", "ema_close_ratio_252",
+        "log_return_120", "log_return_252",
+        "volatility_60_252_ratio",
     ]
 
     # Rolling lookback: ~1 year of trading days (252 bars).
@@ -145,51 +156,67 @@ def _normalize_data(
     ])
 
     # ------------------------------------------------------------------
-    # Per-ticker level deltas (v6 run 4a).
+    # Per-ticker level deltas.
     #
-    # Adds a single 20-bar delta on a hand-picked subset of medium-window
-    # level/ratio features. Computed AFTER z-score normalization, so the
-    # delta is "change in z-scored level over the last 20 bars" — matches
-    # the regime-deltas convention used elsewhere in the pipeline (delta-
-    # of-z-score, not z-score-of-delta).
+    # Two delta horizons, applied to different feature subsets:
     #
-    # Hypothesis: an MLP-style read of per-ticker state needs explicit
-    # trajectory info because the levels are snapshots. Adding deltas
-    # here also gives the existing CNN+Transformer encoder a more direct
-    # trajectory signal, so the test isn't purely "what would help if we
-    # drop the encoder."
+    #   MEDIUM (delta_20) — v6 run 4a additions. Single 20-bar delta on
+    #   medium-window level/ratio features.
+    #   LONG (delta_60)   — v6 run 4c additions. Single 60-bar delta on
+    #   long-window level features.
     #
-    # Features included:
-    #   ema_close_ratio_20      - close vs 20d EMA, medium-window trend
-    #   ema_20_60_ratio         - 20d vs 60d EMA, trend regime ratio
-    #   adx_5_20_ratio          - short vs medium ADX, trend-strength shift
-    #   volatility_5_20_ratio   - short vs medium vol, vol regime ratio
-    #   volume_5_20_ratio       - short vs medium volume, participation shift
+    # All computed AFTER z-score normalization, so each delta is
+    # "change in z-scored level over the last W bars" — matching the
+    # regime-deltas convention (delta-of-z-score, not z-score-of-delta).
+    # All base features are in `features_to_scale` above, so their deltas
+    # inherit the same scale and don't need a separate normalization pass.
     #
-    # All 5 are z-scored above in `features_to_scale`; their deltas
-    # therefore live on the same scale and don't need a separate
-    # normalization pass. adx_14 deliberately excluded — it's CS-
-    # normalized in a later stage, so its level is still raw [0,1] here
-    # and a delta would be on a different scale than the rest.
+    # Hypothesis (4a): an MLP-style read of per-ticker state needs explicit
+    # trajectory info because the levels are snapshots. The 5 medium-window
+    # deltas give snapshot trajectory at the 1-month horizon.
+    #
+    # Hypothesis (4c): long-history per-ticker context — the only existing
+    # per-ticker feature at >60d horizon is rs_spy_252d. 4c adds long-window
+    # level features (ema_close_ratio_252, volatility_60_252_ratio) with
+    # 60d deltas to give the policy a per-ticker "where are we in the
+    # multi-quarter trend" signal that's currently missing from the feature
+    # set. Mechanism is different from the 60d encoder window — these are
+    # base features computed on 120/252-day windows, then z-scored vs
+    # 252-day history, then differenced over 60 days.
+    #
+    # adx_14 deliberately excluded from delta_20 — it's CS-normalized in a
+    # later stage, so its level is still raw [0,1] here and a delta would
+    # be on a different scale than the rest.
     # ------------------------------------------------------------------
-    DELTA_FEATURES = [
+    DELTA_FEATURES_MEDIUM = [
         "ema_close_ratio_20",
         "ema_20_60_ratio",
         "adx_5_20_ratio",
         "volatility_5_20_ratio",
         "volume_5_20_ratio",
     ]
-    DELTA_WINDOW = 20
+    MEDIUM_DELTA_WINDOW = 20
+
+    DELTA_FEATURES_LONG = [
+        "ema_close_ratio_252",
+        "volatility_60_252_ratio",
+    ]
+    LONG_DELTA_WINDOW = 60
 
     if log:
-        print(f"Adding {len(DELTA_FEATURES)} per-ticker delta features "
-              f"(delta_{DELTA_WINDOW} on z-scored levels)...")
+        print(f"Adding {len(DELTA_FEATURES_MEDIUM)} per-ticker delta_{MEDIUM_DELTA_WINDOW} "
+              f"+ {len(DELTA_FEATURES_LONG)} per-ticker delta_{LONG_DELTA_WINDOW} features "
+              f"(z-scored levels)...")
 
-    df = df.with_columns([
-        pl.col(col).diff(n=DELTA_WINDOW).fill_null(0.0)
-            .alias(f"{col}_delta_{DELTA_WINDOW}")
-        for col in DELTA_FEATURES
-    ])
+    df = df.with_columns(
+        [pl.col(col).diff(n=MEDIUM_DELTA_WINDOW).fill_null(0.0)
+             .alias(f"{col}_delta_{MEDIUM_DELTA_WINDOW}")
+         for col in DELTA_FEATURES_MEDIUM]
+        +
+        [pl.col(col).diff(n=LONG_DELTA_WINDOW).fill_null(0.0)
+             .alias(f"{col}_delta_{LONG_DELTA_WINDOW}")
+         for col in DELTA_FEATURES_LONG]
+    )
 
     return df
 
