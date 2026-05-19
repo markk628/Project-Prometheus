@@ -117,6 +117,15 @@ REGIME_TICKERS = [
     "EWJ",          # Japan (yen carry trade / BoJ divergence signal)
 ]
 
+# v7 basket: 5-ticker asset-class diversity ETFs. These live in
+# REGIME_TICKERS (so they participate in shared regime feature
+# computation — RS-vs-SPY baseline, VIX term, yield curve, etc.) but
+# are ALSO trained on as the allocation basket. The "regime = context
+# only" binary is broken specifically for these 5 names. Order matters:
+# action[i] in v7's env corresponds to V7_BASKET[i] — locking now,
+# don't reshuffle later. See dev_log_v7.md.
+V7_BASKET = ['SPY', 'TLT', 'GLD', 'USO', 'UUP']
+
 # Data config
 DATA_TIMESPAN = "minute"
 DATA_START_DATE = '2000-01-01'
