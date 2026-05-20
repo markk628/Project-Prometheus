@@ -179,6 +179,147 @@ single-asset reference), not v5/v6 Sharpe.
 
 ---
 
+## Runs
+
+### Run-1 NaN incident (pre-baseline, debugging)
+
+Before run 1 produced usable results, training crashed three times at
+fold 1 ep 55-56 with NaN actor outputs (`Normal(loc=nan)`). Root cause
+chain:
+
+1. **5-dim summed log_prob overflow.** SAC's log_prob sums the per-dim
+   tanh correction `-log(1 - tanh²(x) + ε)` across 5 action dims. With
+   ε=1e-6, each dim caps at ~-13.8, summed -69 worst-case. Fed through
+   the SAC target `Q = r + γ(Q_next - α·log_prob)`, this produced target
+   magnitudes that overflowed float32 during MSE squaring → NaN
+   gradients. The cascade started as alpha decayed (ep 55, alpha ~0.76)
+   and the policy began concentrating, pushing actions toward tanh
+   saturation.
+2. First fix attempt (gradient finiteness check before optimizer.step)
+   was insufficient — params still went NaN via Adam internals even
+   when grads were finite at the check.
+
+Final fixes (all retained in v7 baseline):
+- tanh-correction ε bumped 1e-6 → 1e-4 (caps per-dim correction at -9.2,
+  sum -46, inside float32 safe range)
+- `log_std_max` tightened 2.0 → 0.0 (max per-dim std 7.4 → 1.0; the v6
+  setting was fine for 1-dim action but produced absurdly wide joint
+  exploration in 5-dim)
+- two-stage NaN guard in agent: pre-step grad-finiteness check AND
+  post-step param-finiteness check with rollback to a pre-step snapshot;
+  skip counters surfaced in logs
+- alpha optimizer given the same gradient clipping as actor/critic
+  (was inconsistently missing)
+
+Also fixed during this period: a pre-IPO NaN-price bug (USO IPO
+2006-04, UUP IPO 2007-02, both post-CUTOFF 2004-12) where episodes
+sampling start_idx before a basket member's IPO hit NaN prices.
+`_build_basket_inputs` now computes the basket-wide valid index range;
+trainer clamps sampling to it. Binding constraint is UUP's 2007-02-20
+IPO. Note: the original dev-log claim that "all five basket members
+have full-timeline data" was wrong — fold 1's effective training
+window is ~2 years shorter than later folds because of this.
+
+### Run 1 — baseline (no regularization)
+
+9 folds × 200 episodes, walk-forward, validation = year N+1.
+
+**Aggregate validation:** mean +7.81%, median +1.11%, STD 28.26%,
+positive 102/180 (56.7%), Sharpe mean +0.42, Sharpe max 3.83.
+
+**Per-fold best validation:**
+
+| Fold | Valid yr | Best ret | Best Sharpe | Note |
+|------|----------|----------|-------------|------|
+| 1 | 2015 | -1.7% | -0.18 | all negative |
+| 2 | 2016 | +3.5% | 0.41 | crossed zero |
+| 3 | 2017 | +11.6% | 1.96 | strong climb |
+| 4 | 2018 | +14.9% | 1.70 | recovered from regime drop |
+| 5 | 2019 | -10.9% | -0.18 | CATASTROPHE: -27% in +29% SPY yr |
+| 6 | 2020 | +120.5% | 3.83 | massive (overfit / COVID vol) |
+| 7 | 2021 | +10.2% | 0.86 | -133pp drop at transition |
+| 8 | 2022 | +3.7% | 0.14 | brutal rate-hike year |
+| 9 | 2023 | +17.4% | 1.46 | final fold |
+
+**Severe overfitting.** Train mean +100.1%, median +87.1%, Sharpe mean
+4.92 — roughly 10x the validation numbers. Cross-fold drops of
+40-133pp at every fold transition (same policy, new validation year).
+The policy memorizes each training regime and crashes on the next.
+Diagnosis: 5 fixed tickers means ~340k params vs ~12k unique trading
+days per fold — capacity vastly exceeds data variety. v6 had ~3000
+tickers as an implicit regularizer; v7 lacks it.
+
+**SAC internals (from full metric curves).** Q peaks 207 (ep ~150),
+collapses to ~25 by fold 4, stable thereafter (peak was alpha-bootstrap
+inflation, collapse is alpha decay removing the entropy bonus from the
+Q-target). Critic loss ~0 from fold 4 onward. Entropy crashes +3 → -5
+between ep 600-1000, stable at -5. Alpha → ~0.01 by fold 6. **System
+fully converged by fold 6** — no meaningful internal dynamics fold 6-9.
+The v6 "still learning at fold 9, bump UTD" pattern does NOT apply;
+critic loss is already zero. (This corrected an earlier misdiagnosis —
+see Target-entropy section.)
+
+### Run 2 — regularization (L2 + dropout + best-checkpoint tracking)
+
+Same fold/episode structure as run 1. Changes: `weight_decay=1e-4` on
+actor+critic Adam; `dropout=0.1` in Actor.trunk + Critic q1/q2 trunks;
+Sharpe-based best-checkpoint tracking per fold; critic_target set to
+eval() so dropout doesn't corrupt Bellman targets.
+
+**Result: regularization did NOT help. Validation got slightly worse.**
+
+| Metric | Run 1 | Run 2 |
+|--------|-------|-------|
+| Valid mean ret | +7.81% | **-1.18%** |
+| Valid median ret | +1.11% | +0.50% |
+| Valid >0 | 56.7% | 52.8% |
+| Valid Sharpe mean | +0.42 | **-0.00** |
+| Valid Sharpe max | 3.83 | 1.65 |
+| Train mean ret | 100.1% | 17.2% |
+| Train Sharpe mean | 4.92 | 0.75 |
+
+The train-val gap shrank, but by **lowering the ceiling, not raising
+the floor.** Train overfitting magnitude dropped sharply (train mean
+100% → 17%, train Sharpe 4.9 → 0.75) but validation moved DOWN to meet
+it rather than the reverse. Per-fold, run 2 was worse in the folds that
+mattered: fold 6 peak 120% → 34%, fold 8 best +3.7% → -5.2% (never
+positive), fold 9 peak +17.4% → +6.2%. Cross-fold cliffs unchanged
+(fold 4→5 still -24%, fold 6→7 still -5.5%). SAC internal curves nearly
+identical to run 1 (same Q peak/collapse, same entropy crash, same
+alpha decay) — L2+dropout at these strengths was a small perturbation
+on optimization, not a structural change.
+
+**Interpretation: wrong class of fix.** We treated the overfitting as
+excess-capacity-memorizing-noise, which capacity-constraint
+regularization addresses. But the cross-fold cliffs are
+**distribution shift between regimes** (2019 bull vs 2018 correction vs
+2022 rate shock are different data-generating processes), not excess
+capacity within a regime. L2/dropout shrink the model's ability to fit
+*any* regime including the legitimate signal, without helping it
+generalize *across* regimes. Can't regularize 2022 into being
+predictable from 2008-2021 if 2022 is genuinely OOD.
+
+**Per the pre-registered plan, run 2's null result is informative:** it
+eliminates the capacity-constraint family. The L2-only and dropout-only
+ablations are now unnecessary (they'd be weaker versions of a change
+that already didn't move validation), saving two runs.
+
+**Caveat:** these are single-seed runs. The val mean delta
+(+7.8% → -1.2%) is probably beyond seed noise given the consistent
+per-fold degradation and near-identical internal curves, but a clean
+confirmation would need one more seed of each. Judgment call: trust the
+signal and move on rather than spend compute confirming a negative.
+
+**Next:** revert regularization (weight_decay → 0 or 1e-5, dropout
+optional), move to target_entropy ablation (run 3) as the lever that
+directly attacks the distribution-shift / regime-lock-in failure mode
+rather than the capacity one. See Target-entropy section. Also
+reconsider problem framing: cross-fold cliffs may indicate one fixed
+policy can't serve all regimes (regime-conditioned policy, regime
+embedding, or revised evaluation horizon are on the table).
+
+---
+
 ## Pending work
 
 Items deferred or filed for later. Add to / strike from as v7 progresses.
@@ -325,13 +466,18 @@ exploration to avoid regime memorization," +3 is more aggressive.
 Probably worth testing both against the -5 baseline so the relationship
 between target value and generalization is visible.
 
-Sequencing within v7: target_entropy is one regularizer among several
-the run 1 results indicate we need (L2 weight decay, dropout, early
-stopping). Cleanest experimental structure is run 2 with the
-traditional regularizer stack (L2 + dropout + early stopping) as the
-first regularization test, then layering target_entropy adjustments
-in run 3 if cross-fold drops persist. Avoids confounding "which
-regularizer helped" if everything is changed at once.
+Sequencing within v7: **now the top-priority next run (run 3).** Run 2
+(L2 + dropout) eliminated the capacity-constraint regularizer family —
+it lowered the overfitting ceiling without raising the validation
+floor, confirming the failure mode is distribution shift between
+regimes, not excess capacity. target_entropy attacks a different
+mechanism: the policy converges to determinism (entropy -5, alpha ~0)
+by fold 6 and then hard-locks onto each training regime, which is
+plausibly what produces the cross-fold cliffs. Forcing sustained
+exploration keeps the policy from committing so hard to one regime's
+allocation. Test +1 and +3 against the -5 baseline. Revert run-2
+regularization first (weight_decay → 0 or 1e-5) so target_entropy is
+tested on the run-1 baseline rather than confounded with L2/dropout.
 
 ### Other items from v7_handoff
 

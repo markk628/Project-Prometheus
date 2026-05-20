@@ -59,6 +59,10 @@ class Agent:
         portfolio_state_len: int = None,
         max_grad_norm: float = 1.0,
         target_entropy: float = None,
+        # v7 run 2: L2 weight decay on actor/critic Adam. Skip alpha
+        # (single scalar — L2 doesn't meaningfully apply).
+        # See dev_log_v7.md (Run 2 — regularization).
+        weight_decay: float = 1e-4,
         logger: Optional[Logger] = None,
         # === New: accept external replay buffer for multi-ticker training ===
         replay_buffer = None,                       # if provided, use this instead of IndexReplayBuffer
@@ -96,10 +100,23 @@ class Agent:
 
         for tp, sp in zip(self.critic_target.parameters(), self.critic.parameters()):
             tp.data.copy_(sp.data)
+        # v7 run 2: with dropout added to critic trunks, the target critic
+        # must stay in eval mode permanently — its purpose is to provide
+        # stable Q-targets for the Bellman update, and dropout active on
+        # target_critic would inject stochastic noise into every target Q
+        # estimate. Online critic stays in train mode by default (dropout
+        # acts as gradient-update regularization there).
+        self.critic_target.eval()
 
         # ── Optimizers ───────────────────────────────────────────────────
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr)
+        # weight_decay applied to actor + critic for run-2 regularization.
+        # Skipped on alpha optimizer (log_alpha is a single scalar).
+        self.actor_optimizer = optim.Adam(
+            self.actor.parameters(), lr=actor_lr, weight_decay=weight_decay,
+        )
+        self.critic_optimizer = optim.Adam(
+            self.critic.parameters(), lr=critic_lr, weight_decay=weight_decay,
+        )
 
         # ── Alpha and Entropy ────────────────────────────────────
         if self.use_automatic_entropy_tuning:

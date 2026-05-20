@@ -224,8 +224,14 @@ class Actor(nn.Module):
         self.trunk = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
+            # v7 run 2: dropout for regularization. Applied between
+            # Linear+GELU blocks in the trunk (where most params live).
+            # Skipped in the small input projections and per-ticker
+            # encoder MLP (already shallow). dropout=0 disables.
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(p=dropout),
         )
 
         self.mean_head = nn.Linear(hidden_dim, action_dim)
@@ -361,8 +367,10 @@ class Critic(nn.Module):
         self.q1_trunk = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(p=dropout),   # v7 run 2: regularization, see Actor trunk
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -383,8 +391,10 @@ class Critic(nn.Module):
         self.q2_trunk = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, 1),
         )
 

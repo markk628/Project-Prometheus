@@ -371,6 +371,13 @@ class DailyTrainer:
         self.train_losses = []
         self.fold_boundaries = []
 
+        # v7 run 2: per-fold best-checkpoint summary. One dict per fold,
+        # appended at fold-end with {fold, best_sharpe, best_ep,
+        # best_valid_return}. Persisted alongside other results via
+        # _save_results so run 2 vs run 1 comparison can use peak Sharpe
+        # rather than fold-end Sharpe.
+        self.fold_best_summary: List[dict] = []
+
         # Fixed validation set for the current fold (re-sampled at each fold
         # start). For v7 this is just a list of start_idx values — basket is
         # fixed so there's no per-ticker dim.
@@ -735,6 +742,17 @@ class DailyTrainer:
                 f"Fixed valid set: {len(self.current_valid_set)} episodes"
             )
 
+        # v7 run 2: per-fold best-checkpoint tracking (Sharpe-based).
+        # Reset at the start of each fold; updated inside _run_validation
+        # whenever the current valid Sharpe exceeds the fold's best so far.
+        # The checkpoint is saved to a fold-specific path so it survives
+        # subsequent valid calls that might be worse. See dev_log_v7.md
+        # (Run 2 — regularization) for context.
+        self._fold_best_sharpe: Optional[float] = None
+        self._fold_best_ep: Optional[int] = None
+        self._fold_best_valid_return: Optional[float] = None
+        self._current_fold_idx = fold_idx
+
         self.fold_boundaries.append({
             "fold": fold_idx + 1,
             "episode_start": global_episode_offset + 1,
@@ -792,6 +810,21 @@ class DailyTrainer:
                     prefix=f"daily_fold{fold_idx+1}_",
                     timestamp=f"{timestamp}_ep{global_ep}",
                 )
+
+        # v7 run 2: persist this fold's best-checkpoint result for run-
+        # level analysis. If no validation ever ran (e.g. fold ended
+        # before first validation interval), best_sharpe stays None.
+        self.fold_best_summary.append({
+            "fold": fold_idx + 1,
+            "best_sharpe": self._fold_best_sharpe,
+            "best_ep": self._fold_best_ep,
+            "best_valid_return": self._fold_best_valid_return,
+        })
+        if self.logger and self._fold_best_sharpe is not None:
+            self.logger.info(
+                f"  [fold {fold_idx+1} summary] best Sharpe {self._fold_best_sharpe:.3f} "
+                f"at ep {self._fold_best_ep} (return {self._fold_best_valid_return:.2f}%)"
+            )
 
         return self.num_episodes_per_fold
 
@@ -881,6 +914,37 @@ class DailyTrainer:
                 f"Positive: {sum(1 for r in valid_returns if r > 0)}/{len(valid_returns)}"
             )
 
+        # v7 run 2: best-checkpoint tracking. If this validation's mean
+        # Sharpe beats the fold's best so far, save the policy weights
+        # under a fold-specific "best" prefix. Comparison metric is the
+        # validation Sharpe across the fixed 10-episode valid set.
+        current_sharpe = float(np.mean(valid_sharpes))
+        is_new_best = (
+            self._fold_best_sharpe is None
+            or current_sharpe > self._fold_best_sharpe
+        )
+        if is_new_best:
+            self._fold_best_sharpe = current_sharpe
+            self._fold_best_ep = int(global_ep)
+            self._fold_best_valid_return = float(np.mean(valid_returns))
+            # Fixed timestamp string ("ckpt") so successive "new best"
+            # saves within the same fold overwrite each other instead of
+            # creating timestamped duplicates. The actual best episode
+            # is recorded in self._fold_best_ep and persisted via
+            # fold_best_summary.
+            best_prefix = f"fold_{fold_idx + 1}_best_"
+            saved_path = self.agent.save_model(
+                save_dir=Path(self.models_dir),
+                prefix=best_prefix,
+                timestamp="ckpt",
+            )
+            if self.logger:
+                self.logger.info(
+                    f"  [best ckpt] fold {fold_idx+1} new best: "
+                    f"Sharpe={current_sharpe:.3f}, Return={self._fold_best_valid_return:.2f}%, "
+                    f"ep={global_ep} → saved {best_prefix}sac_model_ckpt/"
+                )
+
         self.agent.actor.train()
 
         # Incremental persistence — every Nth validation call, re-save
@@ -958,6 +1022,7 @@ class DailyTrainer:
             "train_rewards": self.train_rewards,
             "valid_rewards": self.valid_rewards,
             "fold_boundaries": self.fold_boundaries,
+            "fold_best_summary": self.fold_best_summary,
         }
 
     # ------------------------------------------------------------------
@@ -1002,6 +1067,7 @@ class DailyTrainer:
             # Train-only
             "train_losses": self.train_losses,
             "fold_boundaries": self.fold_boundaries,
+            "fold_best_summary": self.fold_best_summary,
             # Run metadata
             "run_number": self.run_number,
         }
