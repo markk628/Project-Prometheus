@@ -42,7 +42,7 @@ class Agent:
         d_model: int = 64,
         n_heads: int = 4,
         n_transformer_layers: int = 1,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         actor_lr: float = LEARNING_RATE_ACTOR,
         critic_lr: float = LEARNING_RATE_CRITIC,
         alpha_lr: float = LEARNING_RATE_ALPHA,
@@ -59,10 +59,13 @@ class Agent:
         portfolio_state_len: int = None,
         max_grad_norm: float = 1.0,
         target_entropy: float = None,
-        # v7 run 2: L2 weight decay on actor/critic Adam. Skip alpha
-        # (single scalar — L2 doesn't meaningfully apply).
-        # See dev_log_v7.md (Run 2 — regularization).
-        weight_decay: float = 1e-4,
+        # L2 weight decay on actor/critic Adam. Set to 1e-4 for run 2
+        # (regularization experiment) — reverted to 0.0 as default after
+        # run 2 showed capacity-constraint regularization lowered the
+        # overfitting ceiling without raising the validation floor (it's a
+        # distribution-shift problem, not excess capacity). Kept as a
+        # tunable knob. See dev_log_v7.md (Run 2).
+        weight_decay: float = 0.0,
         logger: Optional[Logger] = None,
         # === New: accept external replay buffer for multi-ticker training ===
         replay_buffer = None,                       # if provided, use this instead of IndexReplayBuffer
@@ -100,13 +103,6 @@ class Agent:
 
         for tp, sp in zip(self.critic_target.parameters(), self.critic.parameters()):
             tp.data.copy_(sp.data)
-        # v7 run 2: with dropout added to critic trunks, the target critic
-        # must stay in eval mode permanently — its purpose is to provide
-        # stable Q-targets for the Bellman update, and dropout active on
-        # target_critic would inject stochastic noise into every target Q
-        # estimate. Online critic stays in train mode by default (dropout
-        # acts as gradient-update regularization there).
-        self.critic_target.eval()
 
         # ── Optimizers ───────────────────────────────────────────────────
         # weight_decay applied to actor + critic for run-2 regularization.

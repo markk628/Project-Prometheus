@@ -159,7 +159,11 @@ class Actor(nn.Module):
         d_model: int = 64,
         n_heads: int = 4,
         n_transformer_layers: int = 1,
-        dropout: float = 0.1,
+        # Dropout in the trunk. Set to 0.1 for run 2 (regularization),
+        # reverted to 0.0 default after run 2 (see dev_log_v7.md Run 2).
+        # nn.Dropout(p=0.0) is a no-op; the layers stay wired so the knob
+        # is available for future ablation without code changes.
+        dropout: float = 0.0,
         log_std_min: float = -20.0,
         # v7: log_std_max tightened from 2.0 → 0.0. v6 used log_std_max=2
         # (max per-dim std ≈ 7.4) with 1-dim action; in 5-dim action space
@@ -320,7 +324,8 @@ class Critic(nn.Module):
         d_model: int = 64,
         n_heads: int = 4,
         n_transformer_layers: int = 1,
-        dropout: float = 0.1,
+        # See Actor — 0.0 default (no-op), knob preserved. dev_log Run 2.
+        dropout: float = 0.0,
         device: torch.device = DEVICE,
     ):
         super().__init__()

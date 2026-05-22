@@ -1530,6 +1530,19 @@ def main():
     episode_days = 252
     episodes_per_fold = 200
 
+    # --- Run-3 ablation knobs (edit these to set up a run) ---
+    # target_entropy: SAC entropy-tuning target. -action_dim (=-5) is the
+    #   v6-inherited baseline used in runs 1 & 2. Run 3 tests sustained
+    #   exploration as a regime-lock-in fix: try +1.0 (moderate) and +3.0
+    #   (aggressive) vs the -5 baseline. None → falls back to -action_dim.
+    #   See dev_log_v7.md (Target-entropy ablation).
+    # weight_decay / dropout: reverted to 0 after run 2 (capacity-constraint
+    #   regularization didn't help). Kept here as knobs; leave at 0 unless
+    #   running a regularization ablation.
+    target_entropy = 1.0      # None → -action_dim = -5 (run-1/2 baseline)
+    weight_decay = 0.0
+    dropout = 0.0
+
     temporal_cols = ['day_sin', 'day_cos', 'month_sin', 'month_cos', 'quarter_sin', 'quarter_cos']
 
     logger.info(
@@ -1613,6 +1626,13 @@ def main():
         action_dim=n_tickers,
         input_shape=(n_tickers, n_market_per_ticker),
         portfolio_state_len=portfolio_state_len,
+        target_entropy=target_entropy,
+        weight_decay=weight_decay,
+        dropout=dropout,
+    )
+    logger.info(
+        f"Agent config: target_entropy={target_entropy if target_entropy is not None else f'-action_dim={-n_tickers}'}, "
+        f"weight_decay={weight_decay}, dropout={dropout}"
     )
 
     # --- Train ---

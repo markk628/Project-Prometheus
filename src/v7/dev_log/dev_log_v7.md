@@ -318,6 +318,95 @@ reconsider problem framing: cross-fold cliffs may indicate one fixed
 policy can't serve all regimes (regime-conditioned policy, regime
 embedding, or revised evaluation horizon are on the table).
 
+### Revert + target_entropy plumbing (between run 2 and run 3a)
+
+Reverted run-2 regularizers to inert defaults (kept as tunable knobs,
+not deleted): `weight_decay` 1e-4 → 0.0, `dropout` 0.1 → 0.0 in
+Agent/Actor/Critic (nn.Dropout(p=0.0) is a no-op, layers stay wired),
+removed `critic_target.eval()` (only mattered with dropout active).
+KEPT: best-checkpoint tracking (methodology), all NaN fixes, expanded
+logging. Added a run-3 config block at top of `main()` with three
+knobs (`target_entropy=None`, `weight_decay=0.0`, `dropout=0.0`) wired
+through to the Agent, plus a startup log line `Agent config:
+target_entropy=..., weight_decay=, dropout=` so each run self-documents.
+**Baseline verification:** ran `target_entropy=None` → resolves to
+-action_dim=-5; reproduced run 1 IDENTICALLY (confirmed clean revert,
+so any run-3 delta is attributable to target_entropy alone).
+
+### Run 3a — target_entropy = +1.0 (sustained exploration)
+
+Single change vs run-1 baseline: SAC entropy target -5 → +1.
+
+**Ablation engaged (confirmed via internals).** Unlike runs 1-2 where
+entropy crashed to -5 and alpha decayed to ~0.01, run 3a entropy dips
+to ~0.9 (ep 700) then holds at ~1.0 for the whole back half (mean
+1.667, median 1.005) — the +1 target is binding. Alpha stabilizes at a
+positive equilibrium ~0.05 (mean 0.137, median 0.054) instead of
+collapsing. alpha_loss settles around 0 with two-sided noise (active
+constraint) rather than one-sided decay. Critic loss now genuinely
+near-zero from fold 4 (max 76.6 vs run-1 173.6) — less entropy-bonus
+inflation of the Q-target. q_value peak similar (~207) but settles
+lower (~28 vs run-1 ~45). This is a genuinely different optimization
+trajectory, not a reseed.
+
+**Aggregate validation vs prior runs:**
+
+| Metric | Run 1 | Run 2 | Run 3a (te=+1) |
+|--------|-------|-------|----------------|
+| Valid mean | +7.81% | -1.18% | **+9.49%** |
+| Valid median | +1.11% | +0.50% | **+3.30%** |
+| Valid >0 | 56.7% | 52.8% | **67.8%** |
+| Valid Sharpe mean | +0.42 | -0.00 | **+0.70** |
+| Valid max | 33.9% | — | **117.1%** |
+
+Both floor AND ceiling rose. Pre-registered prediction was half right:
+correctly called the floor / positive-rate would improve, WRONG that
+the ceiling would drop (it rose). Positive rate 56.7% → 67.8% is the
+cleanest single number.
+
+**BUT the failure mode is NOT fixed.** The cross-fold cliffs — the thing
+target_entropy was supposed to attack — are still present and arguably
+sharper. Validation is now a dramatic sawtooth: it climbs steeply
+within each fold, then craters at every fold boundary. Fold 6 (2020)
+climbs to +116.5% / Sharpe 4.17 by ep 1200, then fold 7 opens at
+-3.99% — a ~120pp cliff, *bigger* than run-1's drop and from a much
+higher peak. Fold 8 opens -7.74%, fold 9 opens +0.23%. The policy is
+still completely regime-locked; exploration just lets it climb higher
+within each regime (it doesn't commit prematurely, so it keeps
+improving across a fold's episodes) before falling off when the regime
+changes. The sawtooth IS the regime lock-in, at higher amplitude.
+
+**Fold 6 caveat (important for interpreting the aggregate).** Fold 6
+now reaches +116% / Sharpe 4.17 — even larger than run-1's 120%
+question mark. Its late episodes inflate the aggregate mean
+substantially; +9.49% is NOT evenly distributed (fold 6 and a strong
+fold 9 carry much of it). The "is fold-6 genuine COVID-vol capture or
+artifact" question, open since run 1, is now more load-bearing.
+
+**Genuine within-regime improvements:** fold 5 (2019) recovers from
+run-1's -27% catastrophe to +5.4%; fold 7 peaks +18.9% / Sharpe 1.76
+(up from +10.2%); fold 9 +21.65% / Sharpe 2.26 (best fold-9 any run).
+
+**Honest summary:** te=+1 raised within-regime performance and the
+aggregate, but did NOT solve the cross-fold distribution-shift problem
+it was designed to attack. Helpful, not curative.
+
+**MC sweep now mandatory (not optional).** The whole run1→2→3a chain is
+single-seed with no estimate of seed variance. The mechanism
+demonstrably engaged, but whether +9.49% vs +7.81% is a reliable
+ranking vs seed scatter is unanswerable from one seed each — especially
+since fold 6 (noisiest fold) alone could swing the mean several points.
+Plan: 3 seeds each of baseline (te=-5) and te=+1, same folds; report
+mean ± std of valid-mean and valid-Sharpe AND per-fold spread (to test
+whether fold-5 recovery and the fold-6 monster are stable or
+seed-dependent — this finally answers the fold-6 genuineness question).
+~6 run-days. te=+1 is "real" only if it beats baseline outside ±1 std
+across seeds.
+
+**Run 3b (te=+3) DEFERRED** until the sweep shows te=+1 is
+distinguishable from baseline — no point testing a more aggressive dose
+if the first one isn't measurably different from noise.
+
 ---
 
 ## Pending work
@@ -466,18 +555,24 @@ exploration to avoid regime memorization," +3 is more aggressive.
 Probably worth testing both against the -5 baseline so the relationship
 between target value and generalization is visible.
 
-Sequencing within v7: **now the top-priority next run (run 3).** Run 2
-(L2 + dropout) eliminated the capacity-constraint regularizer family —
-it lowered the overfitting ceiling without raising the validation
-floor, confirming the failure mode is distribution shift between
-regimes, not excess capacity. target_entropy attacks a different
-mechanism: the policy converges to determinism (entropy -5, alpha ~0)
-by fold 6 and then hard-locks onto each training regime, which is
-plausibly what produces the cross-fold cliffs. Forcing sustained
-exploration keeps the policy from committing so hard to one regime's
-allocation. Test +1 and +3 against the -5 baseline. Revert run-2
-regularization first (weight_decay → 0 or 1e-5) so target_entropy is
-tested on the run-1 baseline rather than confounded with L2/dropout.
+Sequencing within v7: **run 3a (te=+1) DONE — see Runs section.** The
+ablation engaged as designed (entropy held at ~1.0, alpha stabilized
+positive ~0.05, confirming the +1 target binds — the predicted
+mechanism). Outcome: it raised within-regime performance and the
+aggregate (valid mean +7.81% → +9.49%, positive rate 56.7% → 67.8%) but
+did NOT fix the cross-fold cliffs it was designed to attack — the
+sawtooth is sharper, not flatter. The pre-registered prediction (lower
+ceiling / higher floor) was half right: floor rose, but ceiling also
+rose. **Standing conclusion: sustained exploration is helpful but not
+curative for the regime-lock-in problem.** Next: MC sweep (3 seeds
+te=-5 vs te=+1) to confirm the delta is above seed noise before
+trusting the ranking or testing te=+3. te=+3 deferred until then.
+
+The remaining open question this raises: if exploration improves
+within-regime ceilings but can't bridge regime boundaries, the cliffs
+may be irreducible for a single fixed policy — which points back at the
+regime-conditioning / regime-embedding idea as the structural fix
+rather than any SAC hyperparameter.
 
 ### Other items from v7_handoff
 
