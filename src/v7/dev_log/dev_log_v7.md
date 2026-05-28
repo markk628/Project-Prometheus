@@ -407,6 +407,149 @@ across seeds.
 distinguishable from baseline — no point testing a more aggressive dose
 if the first one isn't measurably different from noise.
 
+### Reporting-metric audit (post-run-3a) — Sharpe/Sortino + win-rate
+
+Triggered by a run-3a fold-8 episode log showing Sharpe 7.13 alongside
+Win Rate 20.00% with +308% return / PF 5.46 — which looked
+contradictory but isn't. Findings (no code changed):
+
+**These metrics are reporting-only — they do NOT touch training.**
+Verified: `_get_info` is built every step and returned from `step()`,
+but the per-step loop in `_run_episode` only pushes
+`(state, action, reward, next_state, done)` to the replay buffer; it
+never reads `info["sharpe_ratio"]` etc. Only `_log_episode_block`
+(end of episode) consumes them. Agent/buffer never see `info`. Also
+re-confirmed Sharpe/win-rate are NOT in the 22-dim portfolio state
+(state = per-ticker {weight, position_return, hold_time_log,
+dist_from_target} ×5 + {cash_fraction, total_value_log_ratio}); they
+were in v6 state, removed in v7.
+
+**Sharpe/Sortino are CORRECT as logged — no fix needed now.**
+`_get_episode_sharpe` clips daily Sharpe to [-3,3] then `_get_info`
+×√252 to annualize, so the effective reported ceiling is ~47.6
+annualized. The cap has NEVER bitten in any run (train Sharpes ~10 →
+daily 0.63; fold-6 monster 4.17 → daily 0.26 — all far under daily-3).
+So every Sharpe/Sortino logged in runs 1/2/3a is the true value,
+untouched by the clip. The only latent fragility is the `+1e-9`
+denominator (a near-zero-vol episode would inflate the ratio, with the
+cap currently the only backstop) — but no such episode has occurred.
+**Decision: leave Sharpe/Sortino as-is.** They're correct, reporting-
+only, and the clip is a harmless guard. The clipped-vs-annualized design
+question only becomes live IF/when these get added to the portfolio
+state (a state feature needs a bounded, daily, non-annualized version —
+different quantity from the report metric). Defer that design to the
+state experiment itself rather than pre-building it. Calmar scaling is
+correct as-is (annual-return/maxDD, not √-time-scaled).
+
+**Win-rate is misleading for this strategy class — slated for removal.**
+`_get_win_rate` = winning_trades / completed_trades, where a "completed
+trade" only counts when a ticker goes FULLY flat (shares < 1e-9). But
+softmax weights have a ~0.05 floor (run-3a mins ~0.047) so positions
+almost never fully close → win-rate is computed over a tiny subsample of
+rare full-liquidations, not the continuous rebalancing that actually
+generates returns. Worse, full closes happen when the policy EXITS a
+name, which in a trending-up portfolio skews toward losers it's giving
+up on (winners are held ~full episode, never counted). So low win-rate +
+high PF is the EXPECTED signature, not a contradiction. Arithmetic is
+correct; the metric is near-meaningless here. (PF 5.46 and avg win/loss
+2.49 are fine — computed from the per-step return series, not closes.)
+**Decision: remove win-rate from v7 logs (or redefine as positive-step-
+return rate). Reporting-only, so removal is zero-risk — do it after the
+MC sweep to avoid touching code mid-sweep.**
+
+### Run 3a MC sweep — te=-5 vs te=+1, 3 seeds each (RESULT: te=+1 confirmed real)
+
+3 seeds × {te=-5 baseline, te=+1}, 6 runs, same 9 folds, same code.
+Resolves whether run-3a's te=+1 gain was above seed noise, and whether
+the fold-6 monster is structural or luck.
+
+**Seeds & Runs:**
+- te=-5 (baseline): seed 42 = run 1, seed 43 = run 6, seed 44 = run 7
+- te=+1:            seed 42 = run 3, seed 43 = run 4, seed 44 = run 5
+- "run N" = the logged run label; all 6 were part of the run-3a sweep.
+  (Note: te=-5 seed 42 IS the original single-seed "run 1" baseline —
+  same seed, hence its +7.81% matches.)
+
+**Aggregate (mean ± std over 3 seeds):**
+
+| Metric | te=-5 | te=+1 | Separated? |
+|--------|-------|-------|------------|
+| Valid mean ret | +4.12 ± 4.66 | +7.11 ± 3.46 | partial overlap |
+| Valid Sharpe | +0.257 ± 0.231 | +0.574 ± 0.171 | **clean (>1σ)** |
+| Positive rate % | 55.9 ± 1.8 | 67.6 ± 1.4 | **clean, large** |
+
+Per-seed valid means: te=-5 = [+7.81, -1.11, +5.67]; te=+1 = [+9.49,
++3.14, +8.70].
+
+**Verdict: te=+1 is a genuine, replicated improvement — not seed noise.**
+Clears the pre-registered bar (beat baseline by >±1σ) on Sharpe
+(baseline +1σ=0.488 < te=+1 mean 0.574) and decisively on positive rate
+(55.9±1.8 vs 67.6±1.4, no overlap — ~12pp more profitable evals, tight
+across seeds). Raw mean return overlaps (baseline +1σ=8.78 vs te=+1
+mean 7.11) — but mean return is the noisiest summary because fold 6's
+huge variance blurs it; Sharpe and positive-rate (robust to one
+fat-tailed fold) are the right statistics and both separate cleanly.
+
+**KEY FINDING 1 — baseline is wildly seed-dependent; run-1's +7.81% was a
+lucky seed.** Baseline valid-mean ranged +7.81 / -1.11 / +5.67 (9-point
+swing); seed 43 baseline went NEGATIVE. The +7.81 the entire run-1
+narrative was built on is the TOP of baseline's range. This
+retroactively confirms that all earlier single-seed comparisons
+(run1 vs run2, etc.) were reading deltas smaller than seed scatter and
+were noise-dominated. Vindicates the decision to require the sweep.
+
+**KEY FINDING 2 — fold 6's monster is SEED LUCK, not skill (long-open
+question now answered).** Fold-6 (2020) best return per seed:
+- te=-5: [120.5, 40.5, 86.3] → mean 82.5, std 40.1, CV 0.49
+- te=+1: [117.1, 43.3, 96.2] → mean 85.5, std 38.0, CV 0.44
+
+The 120% from run 1 was the high seed; same config seed 43 gives 40.5%
+(3× swing from seed alone). CV ~0.5 ⇒ fold 6 is dominated by seed luck,
+not structural skill. te=+1 and te=-5 are statistically
+indistinguishable on fold 6 (82.5 vs 85.5, both ±~40) — so fold 6 is
+NOT the source of te=+1's advantage. (It also explains the aggregate
+mean-return overlap: fold-6 ±40 variance injects noise across the 180
+evals.)
+
+**Where te=+1's advantage actually comes from (per-fold best ret,
+mean±std over seeds):**
+
+| Fold | te=-5 | te=+1 | delta |
+|------|-------|-------|-------|
+| 1 (2015) | -1.70 ± 0.70 | -1.70 ± 0.70 | +0.00 |
+| 2 (2016) | +3.56 ± 0.63 | +3.56 ± 0.63 | +0.00 |
+| 3 (2017) | +8.47 ± 3.83 | +8.45 ± 3.74 | -0.01 |
+| 4 (2018) | +8.70 ± 7.74 | +7.67 ± 5.19 | -1.03 |
+| 5 (2019) | -10.50 ± 8.75 | -1.57 ± 10.02 | +8.93 |
+| 6 (2020) | +82.45 ± 40.13 | +85.53 ± 38.02 | +3.08 |
+| 7 (2021) | +14.56 ± 3.84 | +20.72 ± 3.44 | **+6.16** |
+| 8 (2022) | +6.06 ± 2.10 | +16.31 ± 7.33 | **+10.25** |
+| 9 (2023) | +10.98 ± 7.56 | +17.24 ± 4.52 | **+6.27** |
+
+Folds 1-3 identical (policy hasn't diverged yet). Gains concentrated in
+late folds. **Trustworthy improvements: folds 7, 8, 9** — consistent
+sign, small-to-moderate std (7 and 9 especially tight). Fold 5's +8.93
+is real in the mean but lives inside enormous variance (±~9-10
+regardless of config) → "directionally better but unreliable." Fold 8
+(2022 rate shock) is the largest reliable delta: +6.06 → +16.31.
+
+**Standing conclusion:** te=+1 is a real but modest improvement
+(~12pp positive rate, Sharpe 0.26→0.57), driven by steadier mid/late-
+fold performance, NOT the fold-6 lottery. It did NOT fix the cross-fold
+cliffs (run-3a finding stands) — it raised the within-fold level, the
+sawtooth structure remains.
+
+**Next decisions:**
+- **Run 3b (te=+3) now JUSTIFIED** (the deferral condition — "te=+1
+  distinguishable from baseline" — is met). Tests whether more
+  exploration helps further or overshoots. Cost: 3 seeds = 3 run-days.
+- **Regime-conditioning** remains the higher-leverage direction if the
+  cliffs (still the dominant failure mode) are the real target —
+  exploration only dented within-fold level, not the boundaries.
+- Methodological lock-in: ALL future config comparisons must be
+  multi-seed. Single-seed deltas in this system are noise-dominated
+  (proven by the 9-point baseline swing).
+
 ---
 
 ## Pending work
@@ -567,6 +710,13 @@ rose. **Standing conclusion: sustained exploration is helpful but not
 curative for the regime-lock-in problem.** Next: MC sweep (3 seeds
 te=-5 vs te=+1) to confirm the delta is above seed noise before
 trusting the ranking or testing te=+3. te=+3 deferred until then.
+
+**UPDATE — MC sweep DONE (see Runs section). te=+1 CONFIRMED real**
+(beats baseline >1σ on Sharpe + positive rate; gains concentrated in
+folds 7/8/9, NOT the fold-6 lottery which turned out to be seed noise,
+CV~0.5). te=+3 (run 3b) is now unblocked and justified. Standing view
+unchanged: helpful but not curative — cliffs remain, regime-conditioning
+is the structural lever.
 
 The remaining open question this raises: if exploration improves
 within-regime ceilings but can't bridge regime boundaries, the cliffs
