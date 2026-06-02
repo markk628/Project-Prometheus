@@ -550,6 +550,114 @@ sawtooth structure remains.
   multi-seed. Single-seed deltas in this system are noise-dominated
   (proven by the 9-point baseline swing).
 
+### Run 3b MC sweep — te=+3, 3 seeds (RESULT: different operating point, not a winner)
+
+3 seeds of te=+3 against the existing 3-seed te=+1 and te=-5 baselines.
+Tests whether more aggressive exploration past te=+1 helps further or
+overshoots.
+
+**Seeds & Runs:**
+- te=+3: seed 42 = run 8, seed 43 = run 9, seed 44 = run 10
+- (te=-5 and te=+1 seeds same as run-3a MC sweep above.)
+
+**Aggregate across 3 seeds — three configs side by side:**
+
+| Metric | te=-5 | te=+1 | te=+3 |
+|--------|-------|-------|-------|
+| Valid mean ret | +4.12 ± 4.66 | **+7.11 ± 3.46** | +6.25 ± 1.68 |
+| Valid median ret | +1.32 ± 0.28 | +3.06 ± 0.48 | **+3.69 ± 1.02** |
+| Mean−median gap (ret) | 2.80 | 4.05 | **2.56** |
+| Valid Sharpe mean | +0.257 ± 0.231 | +0.574 ± 0.171 | **+0.674 ± 0.121** |
+| Valid Sharpe median | +0.172 ± 0.035 | +0.427 ± 0.048 | **+0.618 ± 0.188** |
+| Mean−median gap (Sh) | 0.086 | 0.147 | **0.056** |
+| Positive rate % | 55.9 ± 1.8 | 67.6 ± 1.4 | **72.8 ± 3.4** |
+
+Per-seed te=+3 valid means: [+8.16, +5.58, +5.01]. Note seed 44 (the
+historically "good" seed) was the WEAKEST on te=+3 — see below.
+
+**Verdict: te=+3 is a different operating point in an exploration ↔
+stability tradeoff, NOT a clear winner over te=+1.** By the
+pre-registered ±1σ rule on Sharpe (the most appropriate test):
+te=+1 = 0.574 ± 0.171 (+1σ = 0.745), te=+3 mean = 0.674. te=+3 does NOT
+clear te=+1's +1σ band → cannot be claimed statistically distinguishable
+from te=+1 on Sharpe. Both clearly beat baseline.
+
+**The genuine te=+3 wins (and they ARE real):**
+- **Distribution is more symmetric.** Mean−median gap shrunk on both
+  return (4.05 → 2.56) and Sharpe (0.147 → 0.056) — the bulk of the
+  distribution shifted right rather than relying on a fat right tail.
+- **Sharpe MEDIAN jumped 0.427 → 0.618** (highest of any config). The
+  TYPICAL validation eval got better, not just the average.
+- **Positive rate climbed monotonically: 55.9 → 67.6 → 72.8.** Three
+  configs, three steps up, te=-5 and te=+3 cleanly separated. ~17pp more
+  of validation evals profitable vs baseline. Strongest single trend in
+  the whole project.
+- **Cross-seed std COLLAPSED.** Per-fold std vs te=+1: fold 3 (3.74→1.51),
+  fold 5 (10.02→**1.43**, huge), fold 6 (38.02→25.47), fold 7 (3.44→2.22),
+  fold 9 (4.52→2.54). te=+3 produces more reproducible policies — exactly
+  what stronger exploration should do (stops seed-specific quirky
+  allocations).
+
+**The genuine te=+3 losses:**
+- **Fold 8 (2022, biggest reliable te=+1 win) HALVED.** te=+1 was +16.31,
+  te=+3 dropped to +7.45. The 2022 rate-shock advantage largely gone.
+- **Fold 7 (2021) regressed near baseline.** te=+1 +20.72 → te=+3 +14.77
+  (te=-5 was +14.56).
+- **Fold 6 lottery dampened but still huge variance** (CV 0.44 → 0.40,
+  not a real win there).
+
+**Per-fold best return (3-seed mean ± std):**
+
+| Fold | te=-5 | te=+1 | te=+3 |
+|------|-------|-------|-------|
+| 1 (2015) | -1.70 ± 0.70 | -1.70 ± 0.70 | -2.30 ± 0.79 |
+| 2 (2016) | +3.56 ± 0.63 | +3.56 ± 0.63 | +2.46 ± 0.88 |
+| 3 (2017) | +8.47 ± 3.83 | +8.45 ± 3.74 | +6.02 ± 1.51 |
+| 4 (2018) | +8.70 ± 7.74 | +7.67 ± 5.19 | **+10.33 ± 3.12** |
+| 5 (2019) | -10.50 ± 8.75 | -1.57 ± 10.02 | -2.65 ± 1.43 |
+| 6 (2020) | +82.45 ± 40.13 | +85.53 ± 38.02 | +63.25 ± 25.47 |
+| 7 (2021) | +14.56 ± 3.84 | **+20.72 ± 3.44** | +14.77 ± 2.22 |
+| 8 (2022) | +6.06 ± 2.10 | **+16.31 ± 7.33** | +7.45 ± 5.50 |
+| 9 (2023) | +10.98 ± 7.56 | **+17.24 ± 4.52** | +14.27 ± 2.54 |
+
+**Seed 44 specifically (worth recording — historically the best seed
+across most runs but the weakest on te=+3):** seed 44 te=+1 had nailed
+specific things on folds 6 (+96), 7 (+25), 8 (+19) that other seeds
+didn't find. te=+3's higher exploration washed those specific
+allocations out (seed 44: fold 6 -33, fold 7 -11, fold 8 -16 vs te=+1).
+Seeds 42 and 43 *improved* slightly on Sharpe under te=+3. So "seed 44
+weak on te=+3" isn't a config-wide flaw — it's that seed 44 had the
+most ground to give up under stronger exploration.
+
+**Cross-fold cliffs: still unchanged.** Three target_entropy values
+(-5, +1, +3) now all agree: the cliffs are robust to SAC entropy
+tuning. Exploration-as-a-knob does not touch them, only within-fold
+levels. This is now a settled finding.
+
+**What the three configs collectively reveal about exploration:**
+Going -5 → +1 → +3, positive rate climbs monotonically, cross-seed
+variance shrinks monotonically (especially folds 5, 6), but mean return
+peaks at te=+1 because peak captures diminish. There is a genuine
+exploration ↔ stability tradeoff and we've now sampled two non-baseline
+points on it. Whether te=+2 would be a sweet spot between te=+1's peaks
+and te=+3's stability is an open question (next run).
+
+**Next decisions:**
+- **te=+2 next** (3 seeds, ~3 run-days). Tests whether a midpoint
+  recovers fold 7/8 peaks while keeping te=+3's tighter distribution.
+  If yes → clear winner. If it lands between te=+1 and te=+3 on every
+  metric → exploration is fully characterized as a monotonic
+  peak↔stability tradeoff with no sweet spot, and we move on.
+- **Regime-conditioning remains the unaddressed lever.** Three entropy
+  values can't bridge the cliffs; that's now empirically settled, not
+  speculative.
+- **Pre-registered te=+2 prediction:** likely lands between te=+1 and
+  te=+3 on all aggregate metrics. "Sweet spot" outcome (positive rate
+  ≥ te=+3 AND mean return ≥ te=+1 AND Sharpe mean > te=+1 +1σ) would be
+  the rare three-way win that decisively picks a config. More likely
+  outcome: monotonic interpolation, no decisive winner, exploration
+  declared characterized.
+
 ---
 
 ## Pending work
@@ -717,6 +825,17 @@ folds 7/8/9, NOT the fold-6 lottery which turned out to be seed noise,
 CV~0.5). te=+3 (run 3b) is now unblocked and justified. Standing view
 unchanged: helpful but not curative — cliffs remain, regime-conditioning
 is the structural lever.
+
+**UPDATE 2 — Run 3b (te=+3) DONE.** Different operating point, not a
+clear winner over te=+1. Wins on positive rate (72.8% — monotone climb
+across the three configs), Sharpe median (0.618), distribution symmetry,
+and cross-seed reproducibility (per-fold stds collapsed). Loses on
+fold-7/8 peaks. Does NOT clear te=+1's +1σ Sharpe band, so cannot be
+claimed statistically better than te=+1 — it's a *different* point on an
+exploration↔stability tradeoff. **Next: te=+2** (3 seeds) — tests whether
+a midpoint is a true sweet spot or just an interpolation. Three configs
+agree the cross-fold cliffs are unmoved by entropy tuning — that finding
+is now settled across the full -5/+1/+3 sweep.
 
 The remaining open question this raises: if exploration improves
 within-regime ceilings but can't bridge regime boundaries, the cliffs

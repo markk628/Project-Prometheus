@@ -1539,7 +1539,7 @@ def main():
     # weight_decay / dropout: reverted to 0 after run 2 (capacity-constraint
     #   regularization didn't help). Kept here as knobs; leave at 0 unless
     #   running a regularization ablation.
-    target_entropy = 1.0      # None → -action_dim = -5 (run-1/2 baseline)
+    target_entropy = 3.0      # None → -action_dim = -5 (run-1/2 baseline)
     weight_decay = 0.0
     dropout = 0.0
 
