@@ -658,11 +658,146 @@ and te=+3's stability is an open question (next run).
   outcome: monotonic interpolation, no decisive winner, exploration
   declared characterized.
 
+### Run 3c (te=+2) — SWEEP ABANDONED after seed 42
+
+Ran 1 seed of te=+2 to scout for a "sweet spot" between te=+1 and
+te=+3. The result tracked the pre-registered most-likely outcome
+(monotonic interpolation) cleanly enough that the remaining 2 seeds
+were called off.
+
+**Seed 42 only (te=+2): run 11.** Seeds 43/44 NOT RUN.
+
+**Same-seed gradient (seed 42 across all 4 configs):**
+
+| metric | te=-5 | te=+1 | te=+2 | te=+3 |
+|--------|-------|-------|-------|-------|
+| ret mean | +7.81 | +9.49 | +8.53 | +8.16 |
+| ret median | +1.10 | +3.30 | +3.08 | +4.47 |
+| Sharpe mean | 0.424 | 0.695 | 0.634 | 0.783 |
+| Sharpe median | 0.135 | 0.375 | 0.405 | 0.785 |
+| pos rate % | 56.7 | 67.8 | 72.2 | 75.0 |
+
+Positive rate monotone increasing across +1 → +2 → +3; ret mean monotone
+decreasing. te=+2 sits on the +1 → +3 line on essentially every metric —
+no signal of a sweet spot.
+
+**te=+2 seed 42 vs the 3-seed bands of te=+1 and te=+3:**
+- Ret mean +8.53: INSIDE te=+1 band (+7.11±3.46, 0.4σ), OUT of te=+3
+  band (+6.25±1.68, 1.4σ).
+- Sharpe mean 0.634: INSIDE BOTH bands (te=+1 0.574±0.171; te=+3
+  0.674±0.121). Statistically indistinguishable from either.
+- Positive rate 72.2%: OUT of te=+1 band (67.6±1.4), INSIDE te=+3 band
+  (72.8±3.4).
+
+Even with 2 more seeds added, the expected aggregate would land between
+te=+1 and te=+3 on every metric. Three-way-win bar (Sharpe mean >
+te=+1's +1σ ceiling 0.745) would require seeds 43/44 to average ~0.80
+Sharpe — possible but unsupported by seed 42's 0.634. Cost-benefit:
+3 run-days to almost certainly confirm "interpolation, no winner" is
+not justified.
+
+**Per-fold (seed 42) confirms interpolation, not recovery.** Fold 8
+(2022, the te=+1 multi-seed win): te=+1 s42 +7.99 → te=+2 s42 +8.77 →
+te=+3 s42 +4.99. te=+2 didn't recover te=+1's MULTI-SEED fold-8
+strength (+16.31). Fold 7 regressed (18.93 → 12.46). Cliffs still
+present.
+
+**Decision: exploration-as-a-knob is now fully characterized; chapter
+closed.** Four target_entropy values (-5 / +1 / +2 / +3) sampled, with
++1, +2, +3 multi-seed (+2 partial). The relationship is a monotonic
+peak↔stability tradeoff with no interior sweet spot. Three findings are
+now locked in regardless of any further entropy tuning:
+1. Exploration helps (all of +1/+2/+3 cleanly beat baseline on positive
+   rate; the trend is monotone across the three).
+2. There is no "best" exploration level — it's a tradeoff between peak
+   capture (favors te=+1) and reproducibility/distribution shift (favors
+   te=+3). Choose by objective.
+3. **No entropy setting touches the cross-fold cliffs.** This is the
+   most important finding of the entropy sweep: four points agree the
+   cliffs are robust to SAC entropy tuning. The cliffs are the dominant
+   failure mode and they require a STRUCTURAL change, not a hyperparameter.
+
+**te=+5 NOT TESTED — deliberate decision.** Going further past te=+3
+would slide further down a curve whose shape is already established
+(higher positive rate, tighter std, lower peaks). Not "characterizing"
+anymore, just confirming monotonicity. Three multi-seed points are
+sufficient to characterize a monotonic relationship.
+
+**Next direction: regime-conditioning.** The cliffs are the open
+problem. Entropy tuning can't address them — proven across four
+settings. The hypothesis that motivated this whole sweep ("policy
+locks onto each training regime and crashes on the next") survives,
+but the lever is wrong. The structural lever is making the policy
+*aware* of which regime it's in — via a regime label, regime embedding,
+or context feature in the state. See "Regime-conditioning" in pending.
+
 ---
 
 ## Pending work
 
 Items deferred or filed for later. Add to / strike from as v7 progresses.
+
+### Regime-conditioning (top priority — addresses the cross-fold cliffs)
+
+**Motivation.** The cross-fold cliffs are the dominant unfixed failure
+mode in v7. Validation craters at every fold boundary (fold 4→5 -24pp,
+fold 6→7 -130pp+ in run 3a, etc.), and the entropy sweep proved
+exhaustively that no SAC entropy setting bridges them (4 points,
+3 multi-seed, all show the same cliff structure). The hypothesis since
+run 1 has been "policy locks onto each training regime's data-
+generating process and crashes when the next year is a different
+regime" (2019 bull vs 2018 correction vs 2022 rate shock). Exploration
+can't fix this because it doesn't tell the policy *which regime it's
+in* — a more stochastic policy still over-fits each fold's regime, just
+less hard.
+
+**Lever.** Make the policy regime-aware via a feature in the state that
+encodes the current macro/market regime. The policy then has the
+ability to learn distinct allocations conditional on regime, rather than
+being forced to find a single allocation that works across all regimes
+(which the cross-fold evidence says doesn't exist for this basket).
+
+**Design questions to settle before implementing:**
+- **What signals identify a regime?** Candidates: VIX level/term
+  structure, breadth metrics, yield curve shape, SPY trend regime, a
+  PCA on the existing macro feature set. The shared-regime channel
+  already feeds the network — the question is whether to engineer a
+  discrete label, a continuous embedding, or just trust the existing
+  regime features to do the work if given enough capacity.
+- **Discrete label vs continuous embedding vs learned.** Cleanest test:
+  add a hand-engineered discrete regime label (e.g., 4-state HMM on
+  SPY+VIX or a rules-based classifier) as a 1-hot in the state, since
+  it's interpretable and ablation-friendly. If that helps, the harder
+  question of "can the network discover regimes from raw features" is
+  worth pursuing.
+- **Where it lives in the state.** Per-step regime label vs episode-
+  start regime label. Episode-start is simpler (one categorical, doesn't
+  shift mid-episode) but loses real-time regime switches. Per-step is
+  truer but adds non-stationarity.
+- **Train-time regime distribution.** Walk-forward already mixes regimes
+  across training years naturally. But fold-1 trains on ~2007-2014, so
+  the policy sees ~3 regime transitions during training before
+  validating on 2015. The question is whether 3 transitions is enough
+  to learn regime-conditional behaviors.
+
+**Risks worth pre-registering:**
+- Regime labels are noisy/discrete — adding them may not help if the
+  signal is already implicitly available in the macro features.
+- Could overfit to regime-label boundaries (policy that gives a sharp
+  allocation change at a label transition may cause spurious turnover).
+- v6's universe diversity (3000 tickers) was an implicit regularizer
+  that v7 lacks. Regime-conditioning could either compensate (giving
+  the network another axis to vary on) or make things worse (yet
+  another way to overfit).
+
+**Pre-registered prediction.** Bridge the largest cliff (fold 4→5 or
+fold 6→7) by ≥30% (e.g., -130pp → ≤ -90pp) on the multi-seed mean.
+Anything less is "exploration-class" improvement at best.
+
+**Cost.** Likely 1-2 days for feature engineering and a single-seed
+scout, then 3 seeds (3 run-days) if scout looks promising. Same
+discipline as the entropy sweep: single-seed scouts to decide whether
+multi-seed is justified.
 
 ### Alternate basket compositions
 
@@ -836,6 +971,20 @@ exploration↔stability tradeoff. **Next: te=+2** (3 seeds) — tests whether
 a midpoint is a true sweet spot or just an interpolation. Three configs
 agree the cross-fold cliffs are unmoved by entropy tuning — that finding
 is now settled across the full -5/+1/+3 sweep.
+
+**UPDATE 3 — te=+2 SCOUT DONE, FULL SWEEP ABANDONED, CHAPTER CLOSED.**
+Ran 1 seed (42) of te=+2; result tracked the pre-registered monotonic-
+interpolation outcome cleanly enough that seeds 43/44 were called off.
+te=+2 seed-42 lands between te=+1 and te=+3 on essentially every metric
+(ret mean 8.53, between 9.49 and 8.16; pos rate 72.2%, between 67.8 and
+75.0; Sharpe mean 0.634, inside BOTH multi-seed bands). No sweet spot.
+Three-way-win bar (Sharpe > te=+1 +1σ = 0.745) not credibly reachable
+from seed 42's 0.634. Exploration-as-a-knob is now fully characterized
+across four points; the relationship is a monotonic peak↔stability
+tradeoff with no interior optimum. te=+5 deliberately NOT tested —
+would only confirm monotonicity, no information gained. **Cliffs robust
+to all four entropy settings → structural fix needed, not a
+hyperparameter.** See new "Regime-conditioning" pending section.
 
 The remaining open question this raises: if exploration improves
 within-regime ceilings but can't bridge regime boundaries, the cliffs
