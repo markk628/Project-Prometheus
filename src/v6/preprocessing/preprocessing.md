@@ -15,14 +15,25 @@ so the doc survives refactors.
 ## TL;DR
 
 The pipeline takes ~35,000 raw daily-bar CSVs (one per source ticker, multiple
-years), filters down to ~3,000 tradable + ~25 regime tickers, computes ~25
+years), filters down to ~3,000 tradable + ~25 regime tickers, computes ~37
 per-ticker features + a shared regime feature set, normalizes, and emits a
 single horizontally-stacked parquet plus a per-ticker parquet directory.
+
+The per-ticker feature set grew during v6:
+- 25 base features carried from v5
+- 5 medium-horizon deltas (v6 run 4a): `ema_close_ratio_20_delta_20`,
+  `ema_20_60_ratio_delta_20`, `adx_5_20_ratio_delta_20`,
+  `volatility_5_20_ratio_delta_20`, `volume_5_20_ratio_delta_20`
+- 5 long-horizon base features (v6 run 4c): `log_return_120`,
+  `log_return_252`, `ema_close_ratio_120`, `ema_close_ratio_252`,
+  `volatility_60_252_ratio`
+- 2 long-horizon deltas (v6 run 4c): `ema_close_ratio_252_delta_60`,
+  `volatility_60_252_ratio_delta_60`
 
 ```
                 ┌────────────────────┐
 raw CSVs        │  feature_engineer  │       unified.parquet
-~35k tickers    │                    │       ~3k columns × ~25 features
+~35k tickers    │                    │       ~3k columns × ~37 features
 ─────────────►  │  (pipeline stages) │   ─►  + regime features + temporal
 2003–present    │                    │       2004-12-13 → present
                 └────────────────────┘
@@ -38,34 +49,6 @@ its own — every "this ticker shouldn't be trained on" decision is made in the
 preprocessing pipeline. If something looks wrong in training, it's either a
 genuine model issue or it's coming from upstream of `unified.parquet`; the
 trainer is never the place to add data-quality logic.
-
-### Module layout
-
-The pipeline lives under `src/v6/preprocessing/`. The orchestrating class
-(`DataFeatureEngineer`) is in `feature_engineer.py`; everything it composes
-is in sibling modules with single concerns:
-
-```
-constants.py            module-level constants (windows, gates, thresholds)
-sectors.py              SIC → sector mapping + ETF overrides
-nyse_calendar.py        NYSE trading-day calendar helper
-splits.py               _apply_split_adjustments
-gaps.py                 _handle_gaps
-features.py             _add_*_features (volatility / trend / volume /
-                        candlestick / temporal / VWAP)
-normalization.py        per-ticker rolling z-score
-worker.py               _process_ticker (the ProcessPoolExecutor entry point)
-regime_features.py      shared macro regime computations (used inside
-                        _build_unified — see Stage 9)
-feature_engineer.py     DataFeatureEngineer class (orchestrator only)
-auditor.py              read-only post-hoc verification
-preprocessor.py         CLI entry point
-```
-
-Boundary rule: helper modules don't import each other except via a small
-acyclic graph (worker → splits/gaps/features/normalization;
-normalization → features for the temporal_features list). Module-level
-worker functions stay top-level so ProcessPoolExecutor can pickle them.
 
 ---
 
@@ -140,20 +123,59 @@ worker functions stay top-level so ProcessPoolExecutor can pickle them.
                 └──────────┬─────────────────────┘
                            │
                            ▼
-                ┌──────────────────────────────────┐
-                │   _build_unified                 │  horizontal stack →
-                │                                  │  + breadth, RS-vs-SPY,
-                │                                  │    VIX term structure,
-                │                                  │    macro regime triples
-                │                                  │    (yield curve / credit
-                │                                  │    spread / size / growth
-                │                                  │    / sector rotation),
-                │                                  │    sector one-hots
-                └──────────┬───────────────────────┘
+                ┌──────────────────────┐
+                │   _build_unified     │  horizontal stack →
+                │                      │  + breadth, RS-vs-SPY,
+                │                      │    VIX term structure,
+                │                      │    sector one-hots
+                └──────────┬───────────┘
                            │
                            ▼
                   unified.parquet
 ```
+
+---
+
+## Module layout (post-v6 refactor)
+
+During v6, `feature_engineer.py` was split from a single ~3,000-line file
+into an orchestrator (~2,300 lines) plus 8 helper modules under
+`src/v6/preprocessing/`:
+
+```
+constants.py          shared thresholds, SHARED_REGIME_PREFIXES,
+                      MIN_TICKER_LENGTH, sector ID map
+sectors.py            sector label resolution + fallback rules
+nyse_calendar.py      trading-day calendar utilities
+splits.py             corporate action / split handling
+gaps.py               discontinuity gate, lifecycle segmentation
+features.py           per-ticker feature computation
+                      (candlestick, volatility, trend, volume, temporal)
+normalization.py      per-ticker rolling z-score + per-ticker deltas
+regime_features.py    shared regime feature computation
+                      (kept in tree but partially unused — see notes)
+worker.py             per-ticker dispatch orchestration
+```
+
+The orchestrator (`feature_engineer.py`) imports from these and exposes
+the same public surface as before. Verified bit-identical output via
+`df.equals` on `unified.parquet` immediately after the split.
+
+When adding new features:
+- Per-ticker features → `features.py` (`_add_*_features` family)
+- Per-ticker post-normalization deltas → `normalization.py` (extend
+  `DELTA_FEATURES_MEDIUM` or `DELTA_FEATURES_LONG`)
+- Shared regime features → `regime_features.py` (and add the prefix to
+  `constants.SHARED_REGIME_PREFIXES`)
+- New filter rules → wherever the relevant existing logic lives
+  (`gaps.py` for time-series sanity gates, etc.)
+
+The `SHARED_REGIME_PREFIXES` constant is imported by both the auditor and
+the trainer. **Adding a new shared regime feature family means appending
+its prefix to this constant once** — both auditor categorization and
+trainer column classification pick it up automatically. v6 had a
+classifier bug caused by hardcoding `("breadth_", "vix_term_")` in two
+places; the shared constant fixes that.
 
 ---
 
@@ -308,6 +330,20 @@ inside each worker:
    nulls land in the discarded warmup region rather than in actual training
    data. The cutoff (default 2004-12-13) gets enforced later in
    `_build_unified`.
+
+   After z-scoring, the same function computes per-ticker level deltas on
+   a hand-picked subset of features (delta-of-z-scored-level convention,
+   matching the regime delta machinery). Two delta horizons:
+
+   - **Medium (delta_20)** on 5 features (v6 run 4a):
+     `ema_close_ratio_20`, `ema_20_60_ratio`, `adx_5_20_ratio`,
+     `volatility_5_20_ratio`, `volume_5_20_ratio`.
+   - **Long (delta_60)** on 2 long-window features (v6 run 4c):
+     `ema_close_ratio_252`, `volatility_60_252_ratio`.
+
+   Deltas inherit the same scale as their base features (no separate
+   normalization needed). The first `delta_window` rows are filled with
+   zero via `fill_null(0.0)` and live in the discarded warmup region.
 7. **`_prefix_columns`** — every feature column gets prefixed with
    `{TICKER}_` for the unified frame. Ticker name here is the **segment
    name**, not the source symbol.
@@ -336,35 +372,32 @@ per-ticker rolling z-scores from Stage 7.
 ### Stage 9: `_build_unified`
 
 Horizontal stack of every per-segment parquet onto one timestamp axis
-(left-joined onto the NYSE calendar). Plus several families of shared regime
-features computed at this stage:
+(left-joined onto the NYSE calendar). Plus shared regime features
+computed at this stage by functions in `regime_features.py`:
 
-- **Breadth**: percentage of tradable tickers above moving averages, plus
-  deltas
+- **Breadth**: percentage of tradable tickers above moving averages, at
+  multiple horizons (5d, 20d, 60d, 200d) plus deltas
 - **VIX term structure**: `log(VIXY/VIXM)` and rolling-window variants
+  (5d, 20d, 60d) plus deltas
 - **RS-vs-SPY**: per-ticker relative strength against SPY at multiple
-  horizons
-- **Macro regime triples** (added in v6 run 3a, see `regime_features.py`):
-  - Yield curve — `log(TLT/SHY)` smoothed at 5d / 60d + 60d delta
-  - Credit spread — `log(HYG/LQD)` smoothed at 5d / 60d + 60d delta
-  - Size factor — `log(IWM/SPY)` smoothed at 5d / 60d + 60d delta
-  - Growth factor — `log(QQQ/SPY)` smoothed at 5d / 60d + 60d delta
-  - Sector rotation — cross-sectional dispersion (std) and topbottom
-    (max-min) of the 11 XL\* ETF cumulative returns at 60d / 200d, plus
-    20d delta on the 200d levels
+  horizons (5d, 20d, 60d, 252d) plus `delta_20` and `delta_60` on the
+  long-horizon level
 
-  Each family contributes 3 columns (or 6 for sector_rotation), all
-  z-score normalized via the same `_rolling_zscore_normalize_vectorized`
-  used elsewhere. Total: 18 new shared columns.
+`regime_features.py` also contains computation for 5 macro regime
+feature families (yield curve, credit spread, size factor, growth factor,
+sector rotation) added in v6 run 3a. **These are NOT called in the v6
+capstone configuration** — run 3a was rejected during MC and the call
+sites in `_build_unified` were reverted. The functions remain in the
+module as opt-in plumbing if a future run wants to revisit macro regime
+features (e.g. v7's allocation problem might value them differently from
+v6's single-ticker timing). All shared regime feature prefixes,
+including the rejected 3a families, are listed in
+`constants.SHARED_REGIME_PREFIXES`.
 
-  Macro families resolve their source closes via a small helper
-  (`_resolve_close_col`) that handles the lifecycle-segment case
-  transparently — e.g. when HYG was lifecycle-split into HYG.1
-  (55-bar pre-2007 segment, dropped by MIN_TICKER_LENGTH) and HYG.2
-  (2007–present, saved), the helper picks `HYG.2_close` so the family
-  still computes. EFA and EEM are dropped entirely by the discontinuity
-  gate, so any future regime feature that references them will return
-  empty without crashing.
+`_resolve_close_col` is the helper that handles lifecycle-segmented
+regime tickers transparently (HYG.2, QQQ.2 — the .1 segments got dropped
+by MIN_TICKER_LENGTH). Each regime-feature computation routes through
+this helper rather than hardcoding the segment suffix.
 
 Sector one-hot encoding gets added per-ticker (`{TICKER}_sector_0` …
 `{TICKER}_sector_{N_SECTORS-1}`). Each ticker gets the full block of
@@ -513,42 +546,28 @@ inherently shift through 2008, 2020, and other regime breaks. Would only
 be a real concern if short-horizon features (`log_return_5`, `adx_14`)
 showed up as drifted, which they don't.
 
-The same caveat applies to macro regime features: `yield_curve_5d`,
-`sector_topbottom_200d` and similar will routinely flag as drifting.
-Regime features by design capture regime change, so distributional shift
-across yearly windows is the signal, not noise.
+**Long-horizon features (252d window) are effectively absent for
+short-lifecycle tickers.**
 
-**Regime ETFs lost to the discontinuity gate (EFA, EEM).**
+The v6 4c features (`log_return_252`, `ema_close_ratio_252`,
+`volatility_60_252_ratio`, and their `delta_60` variants) need 252 bars
+of feature-relevant history before they produce non-trivial values, on
+top of the existing 252-day rolling z-score warmup. A ticker with
+~500-700 post-warmup bars will have these features carrying meaningful
+signal for only the last ~250 bars of its lifecycle; before that the
+rolling z-score sees ~zero variance in the underlying long window and
+the z-scored value sits near 0 (= neutral signal, harmless but
+uninformative).
 
-EFA and EEM (international developed markets and emerging markets)
-both have unadjusted ~3× single-day raw moves that breach the
-`DISCONTINUITY_LOG_THRESHOLD`, almost certainly old iShares unit splits
-that Polygon's splits endpoint doesn't carry. They get dropped at the
-per-segment stage, which means any regime feature that would have
-referenced them silently no-ops via `_resolve_close_col` returning None.
+For lifecycle-segmented regime tickers (HYG.2, QQQ.2), the segment
+boundary creates the same effect — long-horizon features need ~252
+bars *after* the segment start before they produce meaningful signal.
 
-For run 3a this is fine — none of the 5 macro families use EFA/EEM. If
-international RS lands on a future feature design, EFA/EEM will need
-either a manual splits override (analogous to the GOOG 2014 case
-described above), a Databento data switch, or replacement with a
-different international vehicle. Documented here so future-me doesn't
-silently wonder why the international features look weak.
-
-**Lifecycle-segmented regime tickers (HYG.2, QQQ.2).**
-
-Two regime tickers had multi-year gaps in raw data and got
-lifecycle-split: HYG (HYG.1 was a 55-bar 2004 fragment, HYG.2 covers
-2007–present) and QQQ (QQQ.1 was a 309-bar 2003-2004 fragment, QQQ.2
-covers 2011–present). The undersized first segments fail the
-`MIN_TICKER_LENGTH` gate; the longer segments are saved with their
-segment-suffixed names.
-
-`regime_features.py::_resolve_close_col` resolves `HYG → HYG.2_close`
-and `QQQ → QQQ.2_close` transparently. Cost: credit_spread loses
-~3 years of pre-2007 coverage, growth_factor loses ~6 years of
-pre-2011 coverage. Those periods get z-score-normalized zeros (no
-signal) for the affected features. Not blocking; documented for future
-data-coverage decisions.
+Not a bug — the alternative (NaN-padded long-horizon features) would
+break the network. The current zero-fill behavior is the correct trade-
+off, but the practical effect is "long-horizon features are absent for
+short-lifecycle tickers / segment beginnings." Downstream code (trainer,
+agent) handles z-score 0 as neutral, so no special-casing needed.
 
 ---
 
@@ -611,14 +630,17 @@ auto-invalidate them — assume they're valid unless something specific
 changed.
 
 `unified.parquet` schema, in column order: `timestamp`, then for each
-segment `{SEGMENT}_close`, `{SEGMENT}_open`, … (per-ticker market features),
-then `{SEGMENT}_sector_0` … `{SEGMENT}_sector_10` (one-hots), then shared
+segment `{SEGMENT}_close`, `{SEGMENT}_open`, … (per-ticker market features
+including 4a deltas and 4c long-history features), then
+`{SEGMENT}_sector_0` … `{SEGMENT}_sector_10` (one-hots), then shared
 regime features (`breadth_*`, `vix_term_structure_*`, `rs_spy_*`,
-`yield_curve_*`, `credit_spread_*`, `size_factor_*`, `growth_factor_*`,
-`sector_dispersion_*`, `sector_topbottom_*`), then their `_delta_*`
-counterparts, then temporal features. The trainer uses column-name
-suffixes/prefixes to classify columns into market / regime / temporal /
-close groups.
+`rs_spy_*_delta_*`), then temporal features. The trainer uses column-
+name patterns (suffixes for per-ticker, prefixes from
+`SHARED_REGIME_PREFIXES` for regime) to classify columns into market /
+regime / temporal / close groups.
+
+unified.parquet is currently ~210k columns (~3000 tickers × ~37
+per-ticker features + ~110 shared regime / temporal / sector columns).
 
 ---
 
@@ -654,11 +676,8 @@ Checks, in order:
    The critical count should be near zero post-fix; that's the canary
    for whether the discontinuity gate caught everything it should have.
 6. **`_check_regime_multicollinearity`** — sanity-checks the shared
-   regime features for redundant pairs. Some are expected (e.g.
-   `vix_term_structure_5d` and `_20d` are highly correlated as
-   smoothed versions of the same series; `sector_dispersion_60d` and
-   `sector_topbottom_60d` are mathematically near-identical for the
-   ~11-item cross-section). Informational, not a bug.
+   regime features for redundant pairs (some are expected, like
+   `vix_term_structure_5d` and `_20d` being highly correlated).
 7. **`_check_for_multicollinearity`** — per-ticker feature-pair
    correlations. CS z-score and sector z-score are highly correlated by
    design (same input, slightly different normalization scope); that's
@@ -720,21 +739,51 @@ when caches are populated.
 Tracked in TODO comments throughout the code. The most consequential
 open items:
 
-- **Run 3b regime features** — the macro families shipped in run 3a
-  (yield curve, credit spread, size factor, growth factor, sector
-  rotation) cover the strongest-prior regime signals. Remaining 3b
-  candidates from the original `REGIME_TICKERS` design pass: dollar
-  regime (UUP), commodities (GLD, USO), international RS (EFA, EEM, EWJ
-  — blocked on the EFA/EEM data limitation noted above). Decision on
-  whether to ship 3b depends on what 3a's MC results reveal.
-- **Manual splits overrides for known unrecorded events.** GOOG
-  2014-04-03 Class C creation, EFA/EEM iShares unit splits, etc. Would
-  recover ~14% of the universe currently lost to the discontinuity gate
-  and make additional regime tickers usable. Cleaner long-term answer is
-  vendor migration.
-- **Vendor evaluation (Databento)** — see "Vendor caveats" above. Worth
-  revisiting if discontinuity skip count grows or if an intraday-data
-  project ever starts.
-- **Centralize `DISCONTINUITY_LOG_THRESHOLD`** — currently lives in
-  `constants.py`. Auditor reports against the same threshold via a
-  hardcoded comparison; could import the constant directly.
+- **Vendor evaluation (Databento migration)** — see "Vendor caveats"
+  above. Pre-staked as a v7+ data quality improvement. Cleaner historical
+  corporate actions would recover the ~14% of the universe currently lost
+  to the discontinuity gate. Most useful paired with v7+ work since v7's
+  small basket doesn't need it; bigger v8+ universes would.
+
+- **Universe-selection survivorship bias** — discontinuity gate,
+  liquidity filter, MIN_TICKER_LENGTH, and ticker-events filtering all
+  run once on the full timeline before walk-forward splits, so each fold
+  trains on a universe pre-selected for full-timeline survival. Fixing
+  per-fold is expensive (9× preprocessing). v7's hand-picked basket
+  sidesteps the problem for free. Documented in detail in `v7_handoff.md`.
+
+- **Macro regime feature redesign** — `regime_features.py` contains
+  implementations of yield curve, credit spread, size factor, growth
+  factor, and sector rotation feature families added in v6 run 3a but
+  not currently called from `_build_unified` (the run rejected during
+  MC for single-ticker timing). v7's allocation problem may value these
+  differently — the call sites in `_build_unified` are commented out, so
+  reactivating them is a one-line change. New regime feature families
+  would need their prefix added to `constants.SHARED_REGIME_PREFIXES`.
+
+- **Underutilized regime tickers** — currently the shared regime feature
+  set only effectively uses SPY + VIXY + VIXM + (in the rejected 3a code)
+  TLT/SHY/HYG/LQD/IWM/QQQ/XL* out of ~25 configured regime tickers.
+  Dollar regime (UUP), commodities (GLD, USO), international RS (EFA,
+  EEM, EWJ), additional rate signals — all reasonable additions to a
+  future regime feature pass that would pull more value from already-
+  loaded regime tickers.
+
+**Recently completed (v6):**
+
+- ✅ **File-size refactor of `feature_engineer.py`** — done in v6.
+  Split from one 3079-line file into 8 helper modules + 2298-line
+  orchestrator under `src/v6/preprocessing/`. Verified bit-identical
+  output via `df.equals`.
+- ✅ **Long-horizon per-ticker features** — done in v6 run 4c.
+  `log_return_120/252`, `ema_close_ratio_120/252`,
+  `volatility_60_252_ratio`, with `delta_60` on the long-window levels.
+  Lives in `features.py` and `normalization.py`.
+- ✅ **Per-ticker medium-horizon deltas** — done in v6 run 4a. Five
+  `delta_20` features in `normalization.py`.
+- ✅ **`SHARED_REGIME_PREFIXES` constant** — single source of truth for
+  shared regime feature prefixes, imported by both auditor and trainer.
+  Fixed a silent classifier bug in v6.
+- ✅ **`_resolve_close_col` helper** — transparent handling of
+  lifecycle-segmented regime tickers (HYG.2, QQQ.2) in regime feature
+  computation.

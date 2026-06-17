@@ -117,6 +117,15 @@ REGIME_TICKERS = [
     "EWJ",          # Japan (yen carry trade / BoJ divergence signal)
 ]
 
+# v7 basket: 5-ticker asset-class diversity ETFs. These live in
+# REGIME_TICKERS (so they participate in shared regime feature
+# computation — RS-vs-SPY baseline, VIX term, yield curve, etc.) but
+# are ALSO trained on as the allocation basket. The "regime = context
+# only" binary is broken specifically for these 5 names. Order matters:
+# action[i] in v7's env corresponds to V7_BASKET[i] — locking now,
+# don't reshuffle later. See dev_log_v7.md.
+V7_BASKET = ['SPY', 'TLT', 'GLD', 'USO', 'UUP']
+
 # Data config
 DATA_TIMESPAN = "minute"
 DATA_START_DATE = '2000-01-01'
@@ -217,6 +226,21 @@ SAVE_MODEL_INTERVAL = 50
 # Evaluation config
 ANNUAL_RISK_FREE_RATE = 0.02
 TRADING_DAYS_PER_YEAR = 252
+
+# Walk-forward split config
+#
+# Shared by the trainer (generate_walk_forward_folds in trainer.py) and the
+# backtester (backtester.py) so the train / valid / test split is defined in
+# exactly one place. The final TEST_YEARS complete calendar years (through
+# DATA_END_YEAR) are held out entirely from training and validation, and used
+# only for the out-of-sample backtest. DATA_END_YEAR is the last FULL calendar
+# year: the raw data runs a few months into the following year (see
+# DATA_END_DATE), but only complete years are used for the walk-forward.
+DATA_START_YEAR = 2005
+DATA_END_YEAR = 2025
+INITIAL_TRAIN_YEARS = 10
+VALID_YEARS = 1
+TEST_YEARS = 2
 
 # Backtest config
 BACKTEST_START_DATE = "2024-01-01"
