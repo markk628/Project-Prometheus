@@ -14,6 +14,16 @@ v7 plan see `v7_handoff.md`. For preprocessing see `preprocessing.md`.
 Stop predicting individual stock returns. Pivot to allocation across a
 5-ticker basket of asset-class ETFs.
 
+## Status — PAUSED (June 2026)
+
+Project pinned after Run 4. The cross-fold cliffs — the dominant failure
+mode since run 1 — remain unsolved, and four interventions have now failed
+to move them: capacity/regularization (Run 2), SAC entropy across four
+settings (Run 3), the existing continuous macro-regime channel, and the
+Run 4 discrete regime label. Evidence points to the cliffs NOT being an
+information problem. Go-forward baseline if resumed: te=+3, no regime
+feature (Run 4 reverted). Resume path in "Where things stand" at the bottom.
+
 ## Why this is the right pivot
 
 v6 capstoned at +10.47% return / +0.484 Sharpe (3-seed MC) — roughly the
@@ -731,13 +741,107 @@ but the lever is wrong. The structural lever is making the policy
 *aware* of which regime it's in — via a regime label, regime embedding,
 or context feature in the state. See "Regime-conditioning" in pending.
 
+### Run 4 — regime-conditioning (discrete 4-state label): RESULT — null, washed out across seeds
+
+First structural swing at the cliffs (the entropy sweep having proven they
+are not a hyperparameter — Run 3c). Added a discrete 4-state market-regime
+one-hot (`regime_state_0..3`) as a shared feature in the regime channel:
+SPY trend (50/200 SMA) × realized vol (20d vs trailing 252d quantile),
+causal, not z-scored. The bet was "distilled low-bandwidth categorical" —
+the network already gets ~45 continuous macro-regime features, so the
+hypothesis was that a clean discrete label is easier for the policy to gate
+on than the high-dim continuous channel. Plumbing was trivial: one
+`compute_*` in `regime_features.py`, prefix in `constants.py`, auto-flows
+into the regime channel (regime_fc 45→49 dims), no trainer changes. Per-bar
+label (a 252-day episode spans multiple regimes, so episode-start was
+rejected). SPY-only inputs chosen over VIX term structure for full-timeline
+coverage (VIXY/VIXM only exist from ~2011).
+
+**Scout (seed 42) looked like a clean hit — and was a trap.**
+- 4→5 cliff (2018→2019, the canonical go-negative fold): return drop
+  19.5pt → 11.4pt (−41%), Sharpe drop 1.61 → 1.09 (−32%). Cleared the
+  pre-registered ≥30% bar.
+- Worst fold −10.4% (2019) → −5.1% (2015); cross-fold dispersion −18%.
+- Cost: aggregate slightly down (ret +8.16→+7.35, Sharpe +0.78→+0.69, pos
+  rate .69→.63), 7/9 folds marginally worse.
+- Secondary concern: the all-checkpoint mean−median Sharpe gap opened
+  (baseline ~0 → regime +0.143) — the typical fold dropped more than the
+  mean, the mean propped up by 2–3 folds. Read at the time as a possible
+  "typical-year for floor" trade.
+- Turnover diagnostic ruled out hard-boundary churn as the cost: regime 515
+  vs baseline 516 trades/block (identical; slightly fewer at the deployed
+  checkpoint). The aggregate cost was the signal changing *allocation*, not
+  extra trading — which also meant discrete-vs-continuous encoding was not
+  where the cost lived (a smooth posterior would not recover it).
+
+Per the pre-registered rule the scout (4→5 ≥30%) triggered the MC.
+
+**MC (3 seeds, regime vs te=+3 baseline): all of it washed out.**
+
+4→5 cliff, return-drop per seed (pt):
+- baseline [19.5, 14.5, 11.4] → 15.1 ± 3.3
+- regime   [11.4, 19.5, 14.1] → 15.0 ± 3.3
+- reduction **+1%**
+
+Seed 42 was the single seed where baseline's cliff happened to be deepest
+*and* regime's happened to be shallowest; on 43/44 the regime cliff was
+*deeper* than baseline. Floor: baseline −9.2±1.1 → regime −11.1±**5.0**
+(~2pt worse, 5× noisier; seed-42's −5.1 was paired with seed-43's −17.3).
+Skew: baseline gap 0.056±0.054 vs regime 0.024±0.087 (overlapping — the
++0.143 was noise; the "typical-year cost" was a seed artifact). Aggregate:
+ret 6.25±1.4 → 5.20±1.7, Sharpe 0.67±0.10 → 0.60±0.08 (slightly lower,
+inside the seed band).
+
+Most telling: the label did not reliably help *or* hurt 2019 — it **5×'d
+that fold's cross-seed variance** (return ±1.1→±5.4, Sharpe ±0.07→±0.38).
+The policy is not finding a *stable* conditional response to the regime
+there; it turns the outcome into a coin flip.
+
+**Decision (pre-registered Decision B): the discrete regime label, as a
+plain appended feature, does not reliably move the cliffs. The lever is not
+"more signal."** Reverted (git).
+
+**Bigger picture.** Two forms of regime signal now — the 45 continuous
+macro features and this distilled discrete one — do nothing to the cliffs,
+on top of entropy (Run 3) and capacity (Run 2). Four swings, four nulls.
+The cliffs increasingly look like they are not an *information* problem.
+Two hypotheses survive:
+1. **Mechanism (Axis B).** The info is usable but the policy will not act
+   conditionally without structural forcing — FiLM modulation or a
+   mixture-of-experts / regime-switching policy. Would reuse the Run-4
+   regime label as a *conditioning input*, not a feature.
+2. **Coverage.** Rare regimes (crisis-type folds) are too under-weighted in
+   training for a stable regime→action mapping to be learnable — exactly
+   what the 2019 variance-blowup looks like (a good response is *findable*
+   on one seed but not reproducible). Cheap, direct test: regime-balanced
+   episode sampling (oversample under-represented regimes / transitions),
+   again reusing the label.
+
+Honest caveat: if the rare regimes are *absent* from the training window
+rather than merely under-weighted, neither axis fixes it — the
+5-fixed-ticker walk-forward cliffs may be near-irreducible for this setup.
+Lean (if resumed): probe coverage first — cheaper than the architecture
+build, reuses the label, and better-motivated now that two signal forms
+have failed (if more *signal* cannot help, the bottleneck is more likely
+*what the policy trains on* than *how it is wired*). Commit to FiLM/MoE
+only if balanced sampling also nulls.
+
 ---
 
 ## Pending work
 
 Items deferred or filed for later. Add to / strike from as v7 progresses.
 
-### Regime-conditioning (top priority — addresses the cross-fold cliffs)
+### Regime-conditioning — discrete label (RESOLVED in Run 4: null result)
+
+**STATUS (Run 4): DONE — washed out across 3 seeds.** The discrete regime
+one-hot as a plain appended feature does not reliably move the cliffs: 4→5
+cliff reduction +1% cross-seed, and the seed-42 −41% bridge was a draw
+(baseline cliff deepest + regime cliff shallowest on that one seed). The
+pre-registered ≥30% bar below was NOT met. The *signal-as-feature* question
+is closed; the regime label itself survives as the input to the two
+remaining levers (mechanism / coverage) — see Run 4 and "Cliffs — next
+levers" below. Original pre-registration retained for the record.
 
 **Motivation.** The cross-fold cliffs are the dominant unfixed failure
 mode in v7. Validation craters at every fold boundary (fold 4→5 -24pp,
@@ -798,6 +902,30 @@ Anything less is "exploration-class" improvement at best.
 scout, then 3 seeds (3 run-days) if scout looks promising. Same
 discipline as the entropy sweep: single-seed scouts to decide whether
 multi-seed is justified.
+
+### Cliffs — next levers after Run 4 (if resumed)
+
+Run 4 closes the "*more signal*" line (entropy, capacity, the continuous
+macro channel, the discrete label — four nulls). Two hypotheses remain:
+
+- **Coverage (lean: try first).** Rare/crisis regimes are too under-weighted
+  in training for a stable regime→action mapping to be learnable (the 2019
+  cross-seed variance-blowup in Run 4 is the signature). Test: regime-balanced
+  episode sampling — reuse the Run-4 label to oversample under-represented
+  regimes / transition periods. Cheap (a sampler change), reuses existing
+  work. Design Qs: balance by regime-state or by transition; how aggressively;
+  episode sampler vs replay buffer.
+- **Mechanism (Axis B, heavier).** The info is usable but the policy will not
+  act conditionally without structural forcing — FiLM layers that modulate
+  the trunk by regime, or a mixture-of-experts / regime-switching policy.
+  Reuses the Run-4 label as a conditioning input. `networks.py` surgery; MoE
+  splits the already-thin per-fold data across experts.
+
+Sequence: coverage scout → if it moves the cliffs, MC it; if not, commit to
+the FiLM/MoE build. If both null, the honest read is that the cliffs may be
+near-irreducible for the 5-fixed-ticker walk-forward setup, and the
+productive moves are elsewhere (alternate baskets below, or revisiting the
+fold structure itself).
 
 ### Alternate basket compositions
 
@@ -999,5 +1127,34 @@ run 2 per-ticker features in observation → run 3 portfolio-state window
 → run 4 cumulative trajectory dims → run 5 turnover penalty → possible
 6+). Not duplicated here. As runs land, each gets its own writeup
 in this dev log under standard `## Run N — [name] ([VERDICT])` headers.
+
+---
+
+## Where things stand (Run 4 — paused)
+
+**The one open problem is the cross-fold cliffs.** Everything else in v7
+works: the pivot to allocation, the SAC plumbing (post the run-1 NaN fixes),
+the walk-forward harness, the regime/feature pipeline. The cliffs —
+validation cratering at fold boundaries — are what kept v7 from a clean
+baseline, and after four swings they are unsolved:
+
+| swing | lever | moved the cliffs? |
+|-------|-------|-------------------|
+| Run 2 | capacity (L2 + dropout) | no — lowered the ceiling, not the floor |
+| Run 3 | SAC entropy (te = -5/+1/+2/+3) | no — 4 points, cliffs robust |
+| baseline | 45 continuous macro-regime features | present anyway |
+| Run 4 | discrete regime label (appended) | no — washed out across seeds |
+
+The accumulating read: the cliffs are **not an information problem.** The
+two untried levers are *coverage* (regime-balanced sampling — cheap, the
+lean) and *mechanism* (FiLM / mixture-of-experts — heavier), both detailed
+under "Cliffs — next levers" in pending; both reuse the Run-4 regime label.
+The honest possibility is that the cliffs are near-irreducible for a
+5-fixed-ticker walk-forward at this data scale, in which case the productive
+directions are the alternate baskets or a different evaluation structure.
+
+**If resumed, start here:** coverage scout (regime-balanced sampling) on the
+te=+3 baseline → MC if it moves the 4→5 / 6→7 cliff ≥30% → else the FiLM/MoE
+build. Same single-seed-scout-then-3-seed-MC discipline used throughout v7.
 
 ---
