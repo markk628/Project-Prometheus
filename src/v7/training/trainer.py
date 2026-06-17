@@ -17,6 +17,11 @@ from src.config.config import (
     RESULTS_DIR,
     SEED,
     BATCH_SIZE,
+    DATA_START_YEAR,
+    DATA_END_YEAR,
+    INITIAL_TRAIN_YEARS,
+    VALID_YEARS,
+    TEST_YEARS,
 )
 from src.v7.environment.environment import DailyEnvironment
 from src.v7.model.agent import Agent
@@ -1570,11 +1575,11 @@ def main():
     # sits right on the feature warmup boundary. Starting at 2005-01-01
     # gives fold 1 a full 10 real calendar years of fully-warmed-up data.
     folds = generate_walk_forward_folds(
-        data_start_year=2005,
-        data_end_year=2025,
-        initial_train_years=10,
-        valid_years=1,
-        test_years=2,
+        data_start_year=DATA_START_YEAR,
+        data_end_year=DATA_END_YEAR,
+        initial_train_years=INITIAL_TRAIN_YEARS,
+        valid_years=VALID_YEARS,
+        test_years=TEST_YEARS,
         logger=logger,
     )
 

@@ -227,6 +227,21 @@ SAVE_MODEL_INTERVAL = 50
 ANNUAL_RISK_FREE_RATE = 0.02
 TRADING_DAYS_PER_YEAR = 252
 
+# Walk-forward split config
+#
+# Shared by the trainer (generate_walk_forward_folds in trainer.py) and the
+# backtester (backtester.py) so the train / valid / test split is defined in
+# exactly one place. The final TEST_YEARS complete calendar years (through
+# DATA_END_YEAR) are held out entirely from training and validation, and used
+# only for the out-of-sample backtest. DATA_END_YEAR is the last FULL calendar
+# year: the raw data runs a few months into the following year (see
+# DATA_END_DATE), but only complete years are used for the walk-forward.
+DATA_START_YEAR = 2005
+DATA_END_YEAR = 2025
+INITIAL_TRAIN_YEARS = 10
+VALID_YEARS = 1
+TEST_YEARS = 2
+
 # Backtest config
 BACKTEST_START_DATE = "2024-01-01"
 BACKTEST_END_DATE = "2025-01-01"
