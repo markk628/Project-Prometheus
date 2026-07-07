@@ -390,7 +390,7 @@ regardless of source).
 If you're considering a vendor switch, the discontinuity gate's catch count
 is the cleanest measure of how much the current data quality is costing —
 that filter directly counts how many tickers Polygon's splits endpoint is
-missing. Currently around 500/3500 ≈ 14% of the post-filter universe, which
+missing. Currently 513/3578 ≈ 14% of the post-filter universe, which
 is meaningful but not catastrophic.
 
 ### Known data limitations

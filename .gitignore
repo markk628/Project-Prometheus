@@ -9,3 +9,4 @@ __pycache__/
 /src/**/dev_log/**/*.png
 /postgreSQL_cmd.txt
 /ta_lib-0.6.8-cp310-cp310-win_amd64.whl
+/src/**/training/*.ipynb

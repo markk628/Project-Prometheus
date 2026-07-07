@@ -1,0 +1,38 @@
+# Conda environment for Project Prometheus.
+#
+# The environment is conda-managed (for Python 3.10) but the dependencies are
+# installed via pip — the project was pinned to a working pip-only set after
+# running into conda/pip version conflicts. Recreate with:
+#
+#     conda env create -f environment.yml
+#     conda activate prometheus
+#
+# NOTE: torch / torchvision / torchaudio below are the CUDA 12.1 builds. On a
+# CPU-only machine, remove the --extra-index-url line and the "+cu121" suffixes.
+
+name: prometheus
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1+cu121
+      - torchvision==0.20.1+cu121
+      - torchaudio==2.5.1+cu121
+      - numpy==2.2.6
+      - pandas==2.3.3
+      - polars==1.38.1
+      - scipy==1.15.3
+      - scikit-learn==1.7.2
+      - matplotlib==3.10.8
+      - seaborn==0.13.2
+      - ta-lib==0.6.8
+      - pandas-market-calendars==5.3.0
+      - gymnasium==1.2.3
+      - python-dotenv==1.2.1
+      - psycopg2==2.9.11
+      - massive==2.2.0
+      - awscli==1.44.51
+      - tqdm==4.67.3
