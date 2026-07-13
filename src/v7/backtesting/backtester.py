@@ -35,6 +35,7 @@ Usage:
   or set MODEL_PATH below and run with no arguments.
 """
 
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -62,6 +63,7 @@ from src.v7.environment.environment import DailyEnvironment
 from src.v7.model.agent import Agent
 from src.v7.model.replay_buffer import DailyReplayBuffer
 from src.utils.utils import create_directory
+from src.utils.logger import Logger
 
 # load_tickers_from_unified and _build_basket_inputs are reused from the
 # trainer so the backtest's data / observation path is byte-identical to
@@ -70,7 +72,7 @@ from src.v7.training.trainer import load_tickers_from_unified, _build_basket_inp
 
 
 # Set this to the model directory to backtest, or pass it as argv[1].
-MODEL_PATH = f"{MODELS_DIR}/v7/run_8/fold_7_best_sac_model_ckpt"
+MODEL_PATH = f"{MODELS_DIR}/v7/run_17/daily_final_sac_model_20260710_064534"
 
 TEMPORAL_COLS = ["day_sin", "day_cos", "month_sin", "month_cos", "quarter_sin", "quarter_cos"]
 
@@ -81,8 +83,8 @@ TEMPORAL_COLS = ["day_sin", "day_cos", "month_sin", "month_cos", "quarter_sin", 
 
 def resolve_test_window(
     timestamps: np.ndarray,
-    data_end_year: int = DATA_END_YEAR,
-    test_years: int = TEST_YEARS,
+    data_end_year: int = 2026, # DATA_END_YEAR, # 2022
+    test_years: int = 3, # TEST_YEARS, # 17
     first_valid_idx: int = 0,
     last_valid_idx: int = None,
 ) -> Tuple[int, int]:
@@ -299,28 +301,37 @@ def compute_metrics(pv: np.ndarray) -> Dict[str, float]:
 # Output
 # --------------------------------------------------------------------------- #
 
-def print_metrics_table(model_m: Dict[str, float], bh_m: Dict[str, float],
-                        start_date: str, end_date: str) -> None:
+def format_metrics_table(model_m: Dict[str, float], bh_m: Dict[str, float],
+                         start_date: str, end_date: str) -> str:
+    """Build the model-vs-buy&hold metrics table as a single string, identical
+    to what was previously printed row-by-row. Returned (rather than printed) so
+    the caller can hand it to the run logger in one call — logging it as a single
+    record keeps the table cleanly aligned instead of stamping a timestamp onto
+    every row (the caller prepends a newline so the whole table stays prefix-free
+    under a blank separator line)."""
     pct = lambda x: ("nan" if np.isnan(x) else f"{x * 100:+.2f}%")
     num = lambda x: ("inf" if np.isinf(x) else ("nan" if np.isnan(x) else f"{x:.3f}"))
     ddp = lambda x: f"{x * 100:.2f}%"
 
     def row(label, key, fmt):
-        print(f"  {label:<15}{fmt(model_m[key]):>15}{fmt(bh_m[key]):>18}")
+        return f"  {label:<15}{fmt(model_m[key]):>15}{fmt(bh_m[key]):>18}"
 
-    print("=" * 50)
-    print(f"  v7 OUT-OF-SAMPLE BACKTEST   {start_date} -> {end_date}")
-    print("=" * 50)
-    print(f"  {'metric':<15}{'model':>15}{'buy&hold(eqwt)':>18}")
-    print("-" * 50)
-    row("total return", "total_return", pct)
-    row("annual return", "annual_return", pct)
-    row("sharpe", "sharpe", num)
-    row("sortino", "sortino", num)
-    row("calmar", "calmar", num)
-    row("profit factor", "profit_factor", num)
-    row("max drawdown", "max_drawdown", ddp)
-    print("=" * 50)
+    lines = [
+        "=" * 50,
+        f"  v7 OUT-OF-SAMPLE BACKTEST   {start_date} -> {end_date}",
+        "=" * 50,
+        f"  {'metric':<15}{'model':>15}{'buy&hold(eqwt)':>18}",
+        "-" * 50,
+        row("total return", "total_return", pct),
+        row("annual return", "annual_return", pct),
+        row("sharpe", "sharpe", num),
+        row("sortino", "sortino", num),
+        row("calmar", "calmar", num),
+        row("profit factor", "profit_factor", num),
+        row("max drawdown", "max_drawdown", ddp),
+        "=" * 50,
+    ]
+    return "\n".join(lines)
 
 
 def plot_equity_curves(dates: np.ndarray, model_pv: np.ndarray, bh_pv: np.ndarray,
@@ -380,10 +391,29 @@ def main() -> None:
     if not model_path.exists():
         raise SystemExit(f"Model path does not exist: {model_path}")
 
+    # One logger for the whole run: mirrors every message to the console (as
+    # before) and writes it into a per-model directory (created on first use)
+    # alongside the equity-curve PNG, so each backtest's console output and plot
+    # live together and are preserved verbatim for the record. Start fresh each
+    # run (like the PNG, which is overwritten) rather than appending.
+    #
+    # Directory name is "{run}_{model}" when the checkpoint lives under a run_N
+    # folder (e.g. .../v7/run_8/fold_7_best_sac_model_ckpt -> the dir
+    # "run_8_fold_7_best_sac_model_ckpt"), so the same model name from different
+    # runs doesn't collide. The nearest run_N to the checkpoint wins; a
+    # checkpoint with no run_N ancestor (e.g. a final daily_final_<ts> model)
+    # just uses the model name.
+    run_tag = next((p for p in reversed(model_path.parts) if re.fullmatch(r"run_\d+", p)), None)
+    backtest_dir_name = f"{run_tag}_{model_path.name}" if run_tag else model_path.name
+    out_dir = Path(RESULTS_DIR) / "v7" / "backtest" / backtest_dir_name
+    log_path = out_dir / f"backtest.txt"
+    log_path.unlink(missing_ok=True)
+    logger = Logger(log_file=str(log_path))
+
     unified_path = f"{DATA_DIR}/preprocessed/v7/unified/unified.parquet"
     basket = list(V7_BASKET)
 
-    print(f"Loading unified data + basket {basket} ...")
+    logger.info(f"Loading unified data + basket {basket} ...")
     all_tickers = load_tickers_from_unified(unified_path, basket, TEMPORAL_COLS)
 
     (
@@ -405,8 +435,8 @@ def main() -> None:
     )
     start_date = np.datetime_as_string(timestamps[test_start_idx], unit="D")
     end_date = np.datetime_as_string(timestamps[test_end_idx], unit="D")
-    print(f"Test window: {start_date} -> {end_date} "
-          f"({test_end_idx - test_start_idx + 1} bars) | model: {model_path.name}")
+    logger.info(f"Test window: {start_date} -> {end_date} "
+                f"({test_end_idx - test_start_idx + 1} bars) | model: {model_path.name}")
 
     agent = load_agent_for_inference(
         model_path, n_tickers, n_market_per_ticker,
@@ -422,13 +452,13 @@ def main() -> None:
 
     model_m = compute_metrics(model_pv)
     bh_m = compute_metrics(bh_pv)
-    print_metrics_table(model_m, bh_m, start_date, end_date)
+    logger.info(f"\n{format_metrics_table(model_m, bh_m, start_date, end_date)}")
 
-    out_dir = Path(RESULTS_DIR) / "v7" / "backtest"
     create_directory(out_dir)
-    plot_path = out_dir / f"backtest_{model_path.name}_{start_date}_{end_date}.png"
+    plot_path = out_dir / f"equity_curve.png"
     plot_equity_curves(dates, model_pv, bh_pv, model_m, bh_m, plot_path)
-    print(f"\nEquity-curve plot saved to: {plot_path}")
+    logger.info(f"Equity-curve plot saved to: {plot_path}")
+    logger.info(f"Backtest log saved to: {log_path}")
 
 
 if __name__ == "__main__":

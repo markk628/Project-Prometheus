@@ -4,8 +4,12 @@ Working notes from the v7 daily-bar SAC project. v7 pivots the project from
 single-ticker timing (the framing v5 and v6 shared) to allocation across a
 small fixed basket of asset-class ETFs.
 
+For pipeline-specific documentation see `preprocessing.md` (in preprocessing directory). 
+
 For prior history see `dev_log_v5.md` and `dev_log_v6.md`. For the original
-v7 plan see `v7_handoff.md`. For preprocessing see `preprocessing.md`.
+v7 plan see `v7_handoff.md`.
+
+Refer to the run_N_description directories for graphs and fold validation results of each run.
 
 ---
 
@@ -14,15 +18,17 @@ v7 plan see `v7_handoff.md`. For preprocessing see `preprocessing.md`.
 Stop predicting individual stock returns. Pivot to allocation across a
 5-ticker basket of asset-class ETFs.
 
-## Status — PAUSED (June 2026)
+## Status — ACTIVE (July 2026) — decay sweep complete, uniform LOCKED
 
-Project pinned after Run 4. The cross-fold cliffs — the dominant failure
-mode since run 1 — remain unsolved, and four interventions have now failed
-to move them: capacity/regularization (Run 2), SAC entropy across four
-settings (Run 3), the existing continuous macro-regime channel, and the
-Run 4 discrete regime label. Evidence points to the cliffs NOT being an
-information problem. Go-forward baseline if resumed: te=+3, no regime
-feature (Run 4 reverted). Resume path in "Where things stand" at the bottom.
+Paused after Run 4 (June 2026); resumed for 
+recency-emphasis sweep, now complete. Run 5 (uniform vs decay-3) was the
+first lever in five swings to move the cliffs in a seed-consistent
+direction (4→5 −26%, 6→7 −29%, 3/3 seeds); Run 6 (decay-1.5 mid-point MC)
+found no knee — the robustness/mean tradeoff is linear in decay — and
+**uniform (decay 0) is locked as the go-forward baseline** (te=+3, no
+regime feature, uniform buffer). Next: retrain the locked config with the
+2023 validation year folded into training, then the one-shot 2024–25
+backtest. After that: regime-balanced sampling.
 
 ## Why this is the right pivot
 
@@ -234,6 +240,9 @@ window is ~2 years shorter than later folds because of this.
 
 9 folds × 200 episodes, walk-forward, validation = year N+1.
 
+**Seeds & Runs:**
+- Seed 42: Run 1
+
 **Aggregate validation:** mean +7.81%, median +1.11%, STD 28.26%,
 positive 102/180 (56.7%), Sharpe mean +0.42, Sharpe max 3.83.
 
@@ -275,6 +284,9 @@ Same fold/episode structure as run 1. Changes: `weight_decay=1e-4` on
 actor+critic Adam; `dropout=0.1` in Actor.trunk + Critic q1/q2 trunks;
 Sharpe-based best-checkpoint tracking per fold; critic_target set to
 eval() so dropout doesn't corrupt Bellman targets.
+
+**Seeds & Runs:**
+- Seed 42: Run 2
 
 **Result: regularization did NOT help. Validation got slightly worse.**
 
@@ -675,7 +687,8 @@ te=+3. The result tracked the pre-registered most-likely outcome
 (monotonic interpolation) cleanly enough that the remaining 2 seeds
 were called off.
 
-**Seed 42 only (te=+2): run 11.** Seeds 43/44 NOT RUN.
+**Seeds & Runs:**
+- seed 42 = run 11
 
 **Same-seed gradient (seed 42 across all 4 configs):**
 
@@ -757,6 +770,9 @@ label (a 252-day episode spans multiple regimes, so episode-start was
 rejected). SPY-only inputs chosen over VIX term structure for full-timeline
 coverage (VIXY/VIXM only exist from ~2011).
 
+**Seeds & Runs:**
+- seed 42 = run 12, seed 43 = run 13, seed 44 = run 14
+
 **Scout (seed 42) looked like a clean hit — and was a trap.**
 - 4→5 cliff (2018→2019, the canonical go-negative fold): return drop
   19.5pt → 11.4pt (−41%), Sharpe drop 1.61 → 1.09 (−32%). Cleared the
@@ -825,6 +841,156 @@ build, reuses the label, and better-motivated now that two signal forms
 have failed (if more *signal* cannot help, the bottleneck is more likely
 *what the policy trains on* than *how it is wired*). Commit to FiLM/MoE
 only if balanced sampling also nulls.
+
+### Run 5 — replay-buffer recency ablation, uniform (decay 0) vs default (decay 3): RESULT — first consistent cliff movement; robustness lever confirmed; sweep continues
+
+Executes the long-pending "Recency-emphasis sweep" (see pending; planned
+since before run 1, inherited from v6's diagnostic that `decay=3.0` was
+upstream of the fold-7 regression) — and doubles as the bluntest form of
+Run 4's coverage hypothesis: instead of oversampling by regime label, stop
+under-weighting the past. Buffer decay 3.0 → 0.0 (uniform transition
+sampling); episode-sampler recency (`recency_decay=1.5`) unchanged; te=+3;
+single-variable. Note this is time-uniformity, not the regime-balanced
+sampling from "Cliffs — next levers" — that remains untested.
+
+**Scout (seed 42):** clean two-tailed variance reduction — all-ckpt valid
+floor up (return min −15.7 → −10.0), ceiling down (88.9 → 66.6, the 2020
+peak), std −30%, mean −2.1pt with median ~flat, mean−median gap halved.
+Mechanism read: recency buys faster in-fold adaptation at the price of
+deeper commitment to the stale regime at each fold break — higher amplitude
+in both directions; uniform damps the amplitude. MC'd per standing
+discipline.
+
+**MC (3 seeds, uniform vs the te=+3 / decay-3 baseline):**
+
+**Seeds & Runs:**
+- seed 42 = run 15, seed 43 = run 16, seed 44 = run 17
+
+Cliffs — the first lever to move them in the same direction on every seed:
+- 4→5 (2018→2019) return-drop: recency [19.5, 14.5, 11.4] (15.1±3.3) →
+  uniform [14.8, 12.1, 7.0] (11.3±3.2) — **−26%, reduced on 3/3 seeds.**
+  Decomposition: ~80% of the reduction is the *landing rising* (2019 fold
+  mean −9.2 → −6.1), not the 2018 peak falling — the good kind.
+- 6→7 (2020→2021) return-drop: 28.2±10.8 → 20.1±5.5 — **−29%, 3/3 seeds**,
+  and the cliff's own cross-seed spread halved. Caveat: mostly the 2020
+  peak normalizing (36.7 → 26.3) — arithmetic peak-trim, not a raised
+  landing (2021's level actually dipped 8.5 → 6.2). Still, this is the
+  transition the v6 diagnostic predicted the buffer decay was causing, and
+  it smoothed under uniform.
+- Sharpe: 4→5 1.24 → 0.96 (−22%, 3/3 seeds); 6→7 ~unmoved (−4%).
+- Against Run 4's pre-registered ≥30% cross-seed bar: a near miss at
+  26/29% — but a categorically different signature from Run 4 (+1% net,
+  mixed per-seed directions). First real movement in five swings.
+
+Variance / floor profile (the scout's pre-registered success criteria —
+held):
+- All-ckpt valid std: return 14.4 → 10.4 (−28%), Sharpe 0.92 → 0.77
+  (−16%) — tighter on all 6 seed×metric pairs.
+- All-ckpt valid floor: return min raised on 3/3 seeds (−15.7→−10.0,
+  −12.7→−12.5, −16.0→−10.3); Sharpe min raised on 2/3 (seed-44 exception,
+  −1.06 → −1.10, negligible).
+- Worst-fold-mean floor (the Run-4 floor metric): −9.2±1.1 → −7.3±2.0
+  (+1.9pt) but only 2/3 seeds — seed 43's 2019 worsened (−7.8 → −10.0).
+  Worst-fold Sharpe flat (−0.46 → −0.48).
+- Cross-fold dispersion (std of per-fold mean return): 12.3 → 9.0 (−27%).
+- Skew: return mean−median gap 2.56 → 1.04 (−59%, tighter on 3/3 seeds).
+  Cross-seed median return 3.69 → 3.63 — the typical checkpoint is
+  unchanged; **the entire mean cost is trimmed high tail.** Positive rate
+  unchanged (72.8% → 72.6%).
+
+Costs:
+- Aggregate: return 6.25±1.4 → 4.67±1.4 (−1.6pt), Sharpe 0.67±0.10 →
+  0.58±0.09 (−0.10) — both ≈1 seed-σ; tail-driven per the median.
+- Ceiling: valid max down on 6/6 (return 63.3 → 47.8 cross-seed), mostly
+  the 2020 fold peak — acceptable-by-design for the cliff objective.
+- 2019 cross-seed variance ×3 (±1.1 → ±3.4 return, ±0.07 → ±0.20 Sharpe):
+  the 2019 mean improved (+3.1pt) but less reproducibly — a milder echo of
+  Run 4's coin-flip signature. The 2019 fix is directionally real, not yet
+  seed-stable.
+
+**Decision: uniform is the first confirmed robustness lever of the
+project** — seed-stable variance reduction, raw floor up, skew halved,
+first 3/3-consistent cliff reduction — at a ~1σ mean cost that is entirely
+high-tail trim. Not yet locked as baseline: the sweep's mid-point is
+untested. **Next: decay=1.5** — the exact parameter mid-point of {0, 3},
+and near-exactly the effect mid-point on the emphasis metric (share of
+samples drawn from the newest 30% of the buffer: 30% at uniform, ~47% at
+1.5, ~62% at decay 3; the metric's true mid-point solves to decay≈1.46).
+Incidentally the same constant as the episode-sampler's
+`recency_decay=1.5`. The open question is whether the
+floor/dispersion/cliff gains are monotone in decay or whether 1.5 keeps
+most of the robustness while recovering part of the tail. Single-seed
+scout, then MC whichever of {0.0, 1.5} wins.
+Once the sweep decides: retrain the winning config with the 2023
+validation year folded into training (closing the 1-year gap between the
+final model's training end and the test window), then run the 2024–25
+backtest fresh. All backtesting is deferred until that retrain — no OOS
+numbers are on the record.
+
+### Run 6 — decay sweep completion, mid-point 1.5 MC: RESULT — no knee, tradeoff linear in decay; uniform (decay 0) LOCKED as baseline
+
+Completes the recency-emphasis sweep {0.0, 1.5, 3.0}. Ran as a full 3-seed
+MC directly rather than the planned scout — both endpoint MCs already
+existed, so the marginal cost was one arm. decay=1.5 is the exact
+parameter mid-point and ~the effect mid-point (newest-30% share:
+30% / ~47% / ~62%).
+
+**The sweep's question was whether 1.5 is a knee — keep uniform's
+robustness, recover the tail. Answer: no. The tradeoff is essentially
+linear in decay.** Interpolation fractions (0 = at decay-3, 1 = at
+uniform): 4→5 cliff 0.44, all-ckpt std 0.51, ceiling 0.52, cross-fold
+dispersion 0.57, mean return 0.42 — half the robustness for half the
+cost, everywhere that matters. Robustness scales with how much recency is
+removed; there is no free region.
+
+**Seeds & Runs:**
+- seed 42 = run 18, seed 43 = run 19, seed 44 = run 20
+
+Deviations from linearity mostly cut against the mid-point:
+- Raw checkpoint floor is a uniform-only effect: −14.8 → −14.6 (frac
+  0.05) → −10.9. 1.5 delivers none of the raw-floor lift, and its seed-43
+  min (−17.2%) is the worst single checkpoint in the entire sweep.
+- Sharpe 4→5 cliff: 1.24 (decay 3) → 1.24 (1.5) → 0.96 (0) — the
+  mid-point does nothing for the Sharpe cliff.
+- Return 4→5 cliff per seed: [19.5, 14.5, 11.4] → [17.7, 14.8, 7.7] →
+  [14.8, 12.1, 7.0]. Uniform beats 1.5 on 3/3 seeds; 1.5 beats baseline
+  on only 2/3 (seed 43 flat). Uniform remains the only arm with 3/3-seed
+  cliff reduction. 6→7: 28.2±10.8 → 22.8±10.2 → 20.1±5.5 (uniform also
+  halves that cliff's own cross-seed spread).
+- In 1.5's favor: most of the skew reduction (gap 2.56 → 1.42 → 1.04,
+  frac 0.75) and the best median of all three arms (3.69 / 4.16 / 3.63,
+  tightest at ±0.25) at a near-free mean cost (−0.67pt = 0.49σ).
+
+Worst-fold-mean floor: −9.2±1.1 → −7.6±1.5 → −7.3±2.0 — effective tie
+between 1.5 and uniform (1.5 tighter and better worst seed-floor, −9.0 vs
+−10.0; uniform better mean by 0.3pt). The 2019 signature is monotone in
+both directions: fold mean −9.2 → −7.2 → −6.1 while cross-seed spread
+±1.1 → ±2.1 → ±3.4 — less recency helps 2019 on average and makes it
+less reproducible at every step. Time-reweighting improves that fold but
+cannot stabilize it; standing argument for regime-balanced sampling next.
+
+**Decision-rule application (rule proposed before these numbers existed:
+4→5 cliff and worst-fold floor decide; std breaks ties; mean a ~1σ
+constraint):** cliff → uniform decisively (11.3 vs 13.4, 3/3 seeds);
+floor → effective tie; std tiebreak → uniform (10.4 vs 12.4).
+**Constraint wrinkle, recorded for the record:** 1.5's mean cost is
+0.49σ (passes cleanly); uniform's is 1.58pt = 1.15σ — past a strict 1.0σ
+bright line, so a hard reading of the constraint would flip the verdict
+to 1.5. Resolved toward uniform on two grounds: (a) the constraint's
+intent is to prevent gutting typical performance, and uniform's median
+checkpoint (3.63) equals the baseline's (3.69) — the entire mean cost is
+trimmed 2020 high-tail, not typical-year damage; (b) a bright line at
+n=3 is false precision (the σ estimate itself carries ~±50% error; the
+paired per-seed cost is [−2.05, −2.75, +0.07] = −1.58±1.20, not even
+cleanly nonzero). The call was a judgment, not a procedure, and is
+logged as such.
+
+**LOCKED: buffer decay = 0.0 (uniform). Go-forward baseline: te=+3, no
+regime feature, uniform replay buffer.** Next per the standing path:
+retrain the locked config with the 2023 validation year folded into
+training (closing the train/test gap), then the one-shot 2024–25
+backtest. Backtesting remains deferred until that retrain; no OOS
+numbers are on the record.
 
 ---
 
@@ -905,6 +1071,16 @@ multi-seed is justified.
 
 ### Cliffs — next levers after Run 4 (if resumed)
 
+**STATUS (Runs 5–6): the coverage axis scored its first partial hit;
+decay sweep complete, uniform locked.** The bluntest coverage
+intervention — time-uniform replay (buffer decay 3→0, Run 5) — reduced
+both cliffs on 3/3 seeds (−26% / −29%, just short of the 30% bar) with a
+seed-stable variance/floor improvement; the mid-point MC (Run 6) found
+the tradeoff linear in decay, and uniform is locked as baseline. The
+regime-balanced sampling below is now the front of the coverage queue —
+better-motivated than ever by the monotone 2019 pattern (less recency
+helps its mean, worsens its reproducibility).
+
 Run 4 closes the "*more signal*" line (entropy, capacity, the continuous
 macro channel, the discrete label — four nulls). Two hypotheses remain:
 
@@ -942,7 +1118,20 @@ Two other baskets to sweep once asset-class diversity has a v7 baseline:
   be in stocks right now" framing but with diversification across the
   equity leg.
 
-### Recency-emphasis sweep
+### Recency-emphasis sweep (RESOLVED — Runs 5–6: {0.0, 1.5, 3.0} complete; uniform LOCKED)
+
+**STATUS (Runs 5–6):** the sweep ran in full (as 3-seed MCs rather than
+the single-fold scout planned below): Run 5 did decay 0.0 vs 3.0, Run 6
+added the 1.5 mid-point. Uniform delivered the first 3/3-seed cliff
+reduction of the project (4→5 −26%, 6→7 −29%) plus std −28% / raw floor
+up / skew halved, at −1.6pt mean (all high-tail trim); the mid-point ran
+as decay=1.5 — moved from the pre-registered 1.0 below (retained for the
+record): 1.5 is the exact parameter mid-point of {0, 3} and near-exactly
+the mid-point on the newest-30%-share metric (30% / ~47% / ~62%; 1.0 sits
+at ~41%). Run 6 verdict: no knee, the tradeoff is linear in decay;
+**uniform (decay 0) locked as baseline**. The v6 diagnosis below holds up
+in direction: the 6→7 transition smoothed as recency was removed. See
+Runs 5–6 for the numbers and the lock decision.
 
 The single most important diagnostic finding from v6: `IndexReplayBuffer`
 with `decay=3.0` is upstream of the persistent fold-7 (2021 melt-up)
@@ -1130,13 +1319,13 @@ in this dev log under standard `## Run N — [name] ([VERDICT])` headers.
 
 ---
 
-## Where things stand (Run 4 — paused)
+## Where things stand (Run 6 — decay locked; retrain + backtest next)
 
 **The one open problem is the cross-fold cliffs.** Everything else in v7
 works: the pivot to allocation, the SAC plumbing (post the run-1 NaN fixes),
 the walk-forward harness, the regime/feature pipeline. The cliffs —
 validation cratering at fold boundaries — are what kept v7 from a clean
-baseline, and after four swings they are unsolved:
+baseline. Six swings so far:
 
 | swing | lever | moved the cliffs? |
 |-------|-------|-------------------|
@@ -1144,17 +1333,26 @@ baseline, and after four swings they are unsolved:
 | Run 3 | SAC entropy (te = -5/+1/+2/+3) | no — 4 points, cliffs robust |
 | baseline | 45 continuous macro-regime features | present anyway |
 | Run 4 | discrete regime label (appended) | no — washed out across seeds |
+| Run 5 | uniform replay buffer (decay 3→0) | **partially — first 3/3-seed reduction (4→5 −26%, 6→7 −29%), short of the 30% bar** |
+| Run 6 | decay mid-point 1.5 (sweep completion) | no knee — tradeoff linear in decay; uniform confirmed on cliffs/floor, **LOCKED** |
 
-The accumulating read: the cliffs are **not an information problem.** The
-two untried levers are *coverage* (regime-balanced sampling — cheap, the
-lean) and *mechanism* (FiLM / mixture-of-experts — heavier), both detailed
-under "Cliffs — next levers" in pending; both reuse the Run-4 regime label.
-The honest possibility is that the cliffs are near-irreducible for a
-5-fixed-ticker walk-forward at this data scale, in which case the productive
-directions are the alternate baskets or a different evaluation structure.
+The read after Run 6: the cliffs are **not an information problem — they
+respond to coverage, linearly in how hard it is pushed.** More signal did
+nothing (Runs 2–4); reweighting *what the policy trains on* is the only
+thing that has moved them, and the effect scales monotonically with how
+much recency weighting is removed. Smaller, not gone: 2019 still lands
+negative under uniform, and its cross-seed variance widens as its mean
+improves — time-reweighting helps that fold but cannot stabilize it.
+Remaining levers, in order: regime-balanced episode sampling (the sharper
+coverage tool, reuses the Run-4 label), then FiLM/MoE if coverage tops
+out. The honest possibility that the residual cliff is near-irreducible
+for a 5-fixed-ticker walk-forward still stands.
 
-**If resumed, start here:** coverage scout (regime-balanced sampling) on the
-te=+3 baseline → MC if it moves the 4→5 / 6→7 cliff ≥30% → else the FiLM/MoE
-build. Same single-seed-scout-then-3-seed-MC discipline used throughout v7.
+**Current path (locked):** retrain the uniform (decay 0, te=+3) config
+with the 2023 validation year folded into training (closing the
+train/test gap) → one-shot 2024–25 backtest → then regime-balanced
+sampling → mechanism. Backtesting remains deferred until that retrain; no
+OOS numbers are on the record. Same single-seed-scout-then-3-seed-MC
+discipline throughout.
 
 ---
