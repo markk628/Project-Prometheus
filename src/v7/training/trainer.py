@@ -1620,7 +1620,7 @@ def main():
         portfolio_state_len=portfolio_state_len,
         action_dim=n_tickers,
         capacity=200_000,
-        decay=3.0,          # v6 default; planned v7 decay sweep before run-1 MC
+        decay=0,          # v6 default; planned v7 decay sweep before run-1 MC
     )
 
     agent = Agent(
