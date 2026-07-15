@@ -1,0 +1,20 @@
+2026-07-15 19:52:09 [INFO] Loading unified data + basket ['SPY', 'TLT', 'GLD', 'USO', 'UUP'] ...
+2026-07-15 19:52:11 [INFO] Test window: 2024-01-02 -> 2026-04-24 (580 bars) | model: daily_final_backtest_sac_model_20260715_060108
+2026-07-15 19:52:19 [INFO] Protocols: annual_reset = HEADLINE (2 reset(s) at 252-bar boundaries, mirrors training); continuous = secondary (protocol-generalization check).
+2026-07-15 19:52:19 [INFO] 
+=============================================================================
+  v7 OUT-OF-SAMPLE BACKTEST   2024-01-02 -> 2026-04-24
+=============================================================================
+  metric           model annual-reset    model continuous      buy&hold(eqwt)
+-----------------------------------------------------------------------------
+  total return                +26.19%             +27.18%             +53.66%
+  annual return               +10.66%             +11.03%             +20.56%
+  sharpe                        1.004               1.047               1.595
+  sortino                       1.498               1.562               2.355
+  calmar                        1.223               1.412               2.554
+  profit factor                 1.247               1.256               1.378
+  max drawdown                  8.72%               7.81%               8.05%
+=============================================================================
+2026-07-15 19:52:19 [INFO] Protocol gap (annual_reset - continuous): total return -0.99pt, Sharpe -0.042 (large gap => episode-length drift is real and continuous deployment would degrade this model; ~zero => continuous deployment is safe).
+2026-07-15 19:52:19 [INFO] Equity-curve plot saved to: C:\dev\project_prometheus\results\v7\backtest\run_23_daily_final_backtest_sac_model_20260715_060108\equity_curve.png
+2026-07-15 19:52:19 [INFO] Backtest log saved to: C:\dev\project_prometheus\results\v7\backtest\run_23_daily_final_backtest_sac_model_20260715_060108\backtest.txt
