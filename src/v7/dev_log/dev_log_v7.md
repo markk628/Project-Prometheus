@@ -280,6 +280,10 @@ The v6 "still learning at fold 9, bump UTD" pattern does NOT apply;
 critic loss is already zero. (This corrected an earlier misdiagnosis —
 see Target-entropy section.)
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_1_5_tickers_results/returns.png)
+![seed 42 sharpes](run_1_5_tickers_results/sharpe.png)
+
 ### Run 2 — regularization (L2 + dropout + best-checkpoint tracking)
 
 Same fold/episode structure as run 1. Changes: `weight_decay=1e-4` on
@@ -357,6 +361,10 @@ target_entropy=..., weight_decay=, dropout=` so each run self-documents.
 -action_dim=-5; reproduced run 1 IDENTICALLY (confirmed clean revert,
 so any run-3 delta is attributable to target_entropy alone).
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_2_L2_Dropout_regularization_results/returns.png)
+![seed 42 sharpes](run_2_L2_Dropout_regularization_results/sharpe.png)
+
 ### Run 3a — target_entropy = +1.0 (sustained exploration)
 
 Single change vs run-1 baseline: SAC entropy target -5 → +1.
@@ -426,6 +434,10 @@ whether fold-5 recovery and the fold-6 monster are stable or
 seed-dependent — this finally answers the fold-6 genuineness question).
 ~6 run-days. te=+1 is "real" only if it beats baseline outside ±1 std
 across seeds.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_3a_target_entropy_1_results/v7_seed42_targetentropy1_returns.png)
+![seed 42 sharpes](run_3a_target_entropy_1_results/v7_seed42_targetentropy1_sharpe.png)
 
 **Run 3b (te=+3) DEFERRED** until the sweep shows te=+1 is
 distinguishable from baseline — no point testing a more aggressive dose
@@ -574,6 +586,10 @@ sawtooth structure remains.
   multi-seed. Single-seed deltas in this system are noise-dominated
   (proven by the 9-point baseline swing).
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_3a_target_entropy_1_results/v7_seed42_targetentropy-5_returns.png)
+![seed 42 sharpes](run_3a_target_entropy_1_results/v7_seed42_targetentropy-5_sharpe.png)
+
 ### Run 3b MC sweep — te=+3, 3 seeds (RESULT: different operating point, not a winner)
 
 3 seeds of te=+3 against the existing 3-seed te=+1 and te=-5 baselines.
@@ -682,6 +698,10 @@ and te=+3's stability is an open question (next run).
   outcome: monotonic interpolation, no decisive winner, exploration
   declared characterized.
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_3b_target_entropy_3_results/v7_seed42_targetentropy3_returns.png)
+![seed 42 sharpes](run_3b_target_entropy_3_results/v7_seed42_targetentropy3_sharpe.png)
+
 ### Run 3c (te=+2) — SWEEP ABANDONED after seed 42
 
 Ran 1 seed of te=+2 to scout for a "sweet spot" between te=+1 and
@@ -754,6 +774,10 @@ locks onto each training regime and crashes on the next") survives,
 but the lever is wrong. The structural lever is making the policy
 *aware* of which regime it's in — via a regime label, regime embedding,
 or context feature in the state. See "Regime-conditioning" in pending.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_3c_target_entropy_2_results/returns.png)
+![seed 42 sharpes](run_3c_target_entropy_2_results/sharpe.png)
 
 ### Run 4 — regime-conditioning (discrete 4-state label): RESULT — null, washed out across seeds
 
@@ -843,6 +867,10 @@ have failed (if more *signal* cannot help, the bottleneck is more likely
 *what the policy trains on* than *how it is wired*). Commit to FiLM/MoE
 only if balanced sampling also nulls.
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_4_discrete_regime_indicators_results/v7_seed42_returns.png)
+![seed 42 sharpes](run_4_discrete_regime_indicators_results/v7_seed42_sharpe.png)
+
 ### Run 5 — replay-buffer recency ablation, uniform (decay 0) vs default (decay 3): RESULT — first consistent cliff movement; robustness lever confirmed; sweep continues
 
 Executes the long-pending "Recency-emphasis sweep" (see pending; planned
@@ -928,6 +956,10 @@ final model's training end and the test window), then run the 2024–25
 backtest fresh. All backtesting is deferred until that retrain — no OOS
 numbers are on the record.
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_5_uniform_replay_buffer_results/v7_seed42_returns.png)
+![seed 42 sharpes](run_5_uniform_replay_buffer_results/v7_seed42_sharpe.png)
+
 ### Run 6 — decay sweep completion, mid-point 1.5 MC: RESULT — no knee, tradeoff linear in decay; uniform (decay 0) LOCKED as baseline
 
 Completes the recency-emphasis sweep {0.0, 1.5, 3.0}. Ran as a full 3-seed
@@ -992,6 +1024,10 @@ retrain the locked config with the 2023 validation year folded into
 training (closing the train/test gap), then the one-shot 2024–25
 backtest. Backtesting remains deferred until that retrain; no OOS
 numbers are on the record.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_6_replay_buffer_decay_1.5_results/v7_seed42_returns.png)
+![seed 42 sharpes](run_6_replay_buffer_decay_1.5_results/v7_seed42_sharpe.png)
 
 ---
 
@@ -1465,6 +1501,9 @@ equal-weight buy-and-hold on risk-adjusted terms at this data scale. The
 value of the result is its rigor: pre-registered criterion, three seeds,
 one shot, no post-hoc window or metric shopping.
 
+**Seed 42 Model's Backtest Result**
+![seed 42 model](backtest_results/precommited_test_set/run_21_daily_final_backtest_sac_model_20260714_063900/seed42_equity_curve.png)
+
 #### Supplementary readout — extended window (NON-GATING, does not affect the verdict)
 
 Not part of the pre-registered test; the criterion above stands on the
@@ -1497,6 +1536,9 @@ Continuous mean Sharpe 1.031 (protocol gap −0.032, negative on all three
 seeds) — same negligible episode-length drift as the registered window.
 Nothing here changes the pre-registered verdict; it corroborates it on
 out-of-time data.
+
+**Seed 42 Model's Backtest Result**
+![seed 42 model](backtest_results/extended_test_set/run_21_daily_final_backtest_sac_model_20260714_063900/seed42_equity_curve.png)
 
 ---
 

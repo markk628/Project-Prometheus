@@ -2,7 +2,11 @@
 
 Working notes from the v5 daily-bar SAC trading project. Captures what was tried, what happened, what we learned, in roughly chronological order.
 
-For pipeline-specific documentation see `preprocessing.md` (in preprocessing directory). This file focuses on training runs, debugging arcs, and the lessons that came out of them.
+For pipeline-specific documentation see `preprocessing.md` (in preprocessing directory). 
+
+This file focuses on training runs, debugging arcs, and the lessons that came out of them.
+
+Refer to the run_N_description directories for graphs and fold validation results of each run.
 
 ---
 
@@ -29,6 +33,9 @@ For pipeline-specific documentation see `preprocessing.md` (in preprocessing dir
 - `_check_price_discontinuities` — flags single-day log-return breaches (suspicious ≥ 50%, critical ≥ 100%).
 - `_classify_close_nulls` — suppresses benign delisting/pre-IPO null warnings from the report (covered by survivorship check).
 
+![run 1 returns](run_1_initial_daily_bar_results/returns.png)
+![run 1 sharpes](run_1_initial_daily_bar_results/sharpe.png)
+
 ---
 
 ## Run 2 — Clean Baseline
@@ -53,6 +60,8 @@ For pipeline-specific documentation see `preprocessing.md` (in preprocessing dir
 - Verified via direct API call that GOOG's 2014-04-03 Class C split is missing from Polygon's splits endpoint. Their database only has the 2022 stock dividend.
 - Decision: live with it for v5, document in `preprocessing.md`. Vendor migration to Databento pushed to v7.
 
+![run 2 returns](run_2_daily_bar_after_data_clean_up_results/returns.png)
+![run 2 sharpes](run_2_daily_bar_after_data_clean_up_results/sharpe.png)
 ---
 
 ## Run 3 — Long-Horizon Regime Features
@@ -82,6 +91,8 @@ For pipeline-specific documentation see `preprocessing.md` (in preprocessing dir
 
 **Open question after run 3:** Alpha collapse pattern unchanged from run 2 (~0.025 by fold 9 in both). Better features made the actor confident faster, accelerating entropy collapse. Suggested run 4 needed to address the convergence-before-data issue rather than add more features.
 
+![run 3 returns](run_3_long_horizon_regime_features_results/returns.png)
+![run 3 sharpes](run_3_long_horizon_regime_features_results/sharpe.png)
 ---
 
 ## Run 4 — UTD=4 + Slow Alpha LR (Overfitting)
@@ -129,6 +140,8 @@ Run 4 trained the network "harder" on the same data and the network learned trai
 
 **Decision:** UTD=4 rejected as a single-variable change. Useful negative result — it proved gradient-update density past a certain point hurts generalization for this setup.
 
+![run 4 returns](run_4_utd_4_and_slow_alpha_lr_results/returns.png)
+![run 4 sharpes](run_4_utd_4_and_slow_alpha_lr_results/sharpe.png)
 ---
 
 ## Run 5 — UTD=2 (The Sweet Spot)
@@ -176,6 +189,9 @@ Run 4 trained the network "harder" on the same data and the network learned trai
 The training loss curves in run 5 are similar to run 4's (critic loss rising then falling, Q-value bottoming late then recovering) but the validation goes the right direction. Same training shape, opposite validation shape. The difference is gradient-update density crossing some implicit-regularization threshold.
 
 **This is the v5 capstone result.**
+
+![run 5 returns](run_5_utd_2_results/returns.png)
+![run 5 sharpes](run_5_utd_2_results/sharpe.png)
 
 ---
 

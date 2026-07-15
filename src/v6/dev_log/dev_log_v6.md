@@ -4,8 +4,12 @@ Working notes from the v6 daily-bar SAC trading project. Architectural and
 structural experiments built on the v5 run-5 baseline (UTD=2, slow alpha LR
 1e-5, all run-3 regime features, all run-2 data fixes).
 
+For pipeline-specific documentation see `preprocessing.md` (in preprocessing directory).
+
 For the v5 history see `dev_log_v5.md`. For the original v6 plan see
 `v6_handoff.md`.
+
+Refer to the run_N_description directories for graphs and fold validation results of each run.
 
 ---
 
@@ -148,13 +152,6 @@ nondeterminism wasn't the dominant noise source for this setup. The
 dominant variance source is the seed itself (init, replay sampling,
 exploration), which is what motivated the MC sweep below.
 
-**Process lesson:** "results matched after enabling determinism" is
-ambiguous on its own — could mean either "determinism wasn't doing
-anything" or "determinism is on but cuDNN noise wasn't a big factor here."
-Disambiguate by varying the seed: if results barely move across seeds, the
-network is robust to all stochasticity; if they move noticeably, seed
-matters and determinism is your reproducibility floor for that variance.
-
 ---
 
 ## Run 1 — Remove Sharpe from portfolio_state (REJECTED)
@@ -278,6 +275,10 @@ on that.
 **Negative result, useful diagnosis** — same shape as v5 run 4 (UTD=4
 overfit). The change was well-motivated, the test was rigorous, and the
 data says don't ship it.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_1_sharpe_ratio_removal_results/v6_seed42_returns.png)
+![seed 42 sharpes](run_1_sharpe_ratio_removal_results/v6_seed42_sharpe.png)
 
 ---
 
@@ -422,6 +423,10 @@ made the *training curve plot* look weird, but it didn't make the
 **Decision: REVERT.** Restore win_rate to `portfolio_state`. v6 baseline
 returns to v5 run-5 config exactly (7 portfolio dims) for the second
 time.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_2_win_rate_removal_results/v6_seed42_returns.png)
+![seed 42 sharpes](run_2_win_rate_removal_results/v6_seed42_sharpe.png)
 
 ---
 
@@ -591,6 +596,10 @@ third time. Skip 3b — the speculative families (dollar, commodities,
 international) have weaker priors than 3a's families and the bundle
 hypothesis already failed at the strongest-prior version. Move on to
 run 4.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_3a_extra_regime_features_results/v6_seed42_returns.png)
+![seed 42 sharpes](run_3a_extra_regime_features_results/v6_seed42_sharpe.png)
 
 ---
 
@@ -847,6 +856,10 @@ baseline (not against v5 directly), so 4b's signal will purely reflect
 the encoder-vs-MLP architectural question, not entangled with the
 feature-engineering question 4a already answered.
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_4a_per_ticker_delta_features_results/v6_seed42_returns.png)
+![seed 42 sharpes](run_4a_per_ticker_delta_features_results/v6_seed42_sharpe.png)
+
 ---
 
 ## Cross-Cutting Lessons from Run 4a
@@ -1053,12 +1066,16 @@ Sharpe drop is mostly attributable to fold 7's recency-emphasis problem
 which is independent of the encoder vs MLP question, (e) cleaner
 architecture for v7.
 
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_4b_mlp_nn_results/v6_4b_seed42_returns.png)
+![seed 42 sharpes](run_4b_mlp_nn_results/v6_4b_seed42_sharpe.png)
+
 ---
 
 ## Cross-Cutting Lessons from Run 4b
 
 **Pre-committed decision rules accommodate "equivalent at lower cost"
-naturally.** Our rule was "match the encoder at lower complexity, not
+naturally.** The rule was "match the encoder at lower complexity, not
 beat it." That's exactly what 4b achieved. If we had used "must improve
 aggregate metrics" as the rule, 4b would have failed (Sharpe -0.033)
 and we'd have shipped the encoder instead — losing both the
@@ -1275,6 +1292,10 @@ performance.
 
 **v6 final config:** v5 run-5 baseline + 4a per-ticker deltas + 4b
 MLP-only `FeatureExtractor` + 4c long-history per-ticker base features.
+
+**Seed 42 Returns & Sharpes**
+![seed 42 returns](run_4c_long_horizon_per_ticker_features_results/v6_4c_seed42_returns.png)
+![seed 42 sharpes](run_4c_long_horizon_per_ticker_features_results/v6_4c_seed42_sharpe.png)
 
 ---
 
