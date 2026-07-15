@@ -18,7 +18,7 @@ DATA_DIR = ROOT_DIR / "data"                                                    
 LOGS_DIR = ROOT_DIR / "logs"                                                       # Logs dir
 TRAINING_LOGS_DIR = LOGS_DIR / "training"                                          # Training logs dir
 TRADING_LOGS_DIR = LOGS_DIR / "trading"                                            # Trading logs dir
-PREPROCESSING_LOGS_DIR = LOGS_DIR / "preprocessing"                                      # Preprocessing logs dir
+PREPROCESSING_LOGS_DIR = LOGS_DIR / "preprocessing"                                # Preprocessing logs dir
 MODELS_DIR = ROOT_DIR / "models"                                                   # Models dir
 RESULTS_DIR = ROOT_DIR / "results"                                                 # Results dir
 
@@ -222,6 +222,7 @@ BATCH_SIZE_MULTIDAY_MINUTE = 512
 NUM_EPISODES = 200
 VALID_INTERVAL = 10
 SAVE_MODEL_INTERVAL = 50
+DAYS_PER_EPISODE = 252
 
 # Evaluation config
 ANNUAL_RISK_FREE_RATE = 0.02

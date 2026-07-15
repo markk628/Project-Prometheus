@@ -17,6 +17,7 @@ from src.config.config import (
     RESULTS_DIR,
     SEED,
     BATCH_SIZE,
+    DAYS_PER_EPISODE,
     DATA_START_YEAR,
     DATA_END_YEAR,
     INITIAL_TRAIN_YEARS,
@@ -28,6 +29,17 @@ from src.v7.model.agent import Agent
 from src.v7.preprocessing.constants import SHARED_REGIME_PREFIXES
 from src.utils.logger import Logger
 from src.utils.utils import create_directory, load_stock_data, format_duration, resolve_run_number
+
+# Backtest-prep switch. When True, generate_walk_forward_folds appends one
+# extra validation-less training segment that folds the final validation
+# year (DATA_END_YEAR - TEST_YEARS, e.g. 2023) into training, so the final
+# saved model — prefixed daily_final_backtest_ — has trained on every
+# non-test year with zero exposure to the test window (its episode pool is
+# containment-constrained; no episode extends past train_end). The standard
+# walk-forward folds and their validation run unchanged first. This is the
+# model the backtester should evaluate. Costs one extra fold's worth of
+# episodes (NUM_EPISODES).
+FOR_BACKTEST = True
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +220,7 @@ def generate_walk_forward_folds(
     initial_train_years: int = 10,
     valid_years: int = 1,
     test_years: int = 2,
+    for_backtest: bool = False,
     logger: Optional[Logger] = None,
 ) -> List[Dict[str, date]]:
     """
@@ -224,8 +237,21 @@ def generate_walk_forward_folds(
         Fold 10: Train 2004-2022, Valid 2023
         (2024-2025 reserved for final test)
 
+    for_backtest=True appends one extra VALIDATION-LESS training segment
+    whose window runs through test_start_year - 1, i.e. it folds the final
+    validation year into training. Rationale: the standard folds never
+    train on the last validation year, leaving a 1-year gap between the
+    deployed model's training end and the test window; this segment closes
+    it so the final saved model has trained on every non-test year. There
+    is no honest validation window left (the following years ARE the test
+    holdout), so valid_start/valid_end are None — the trainer skips
+    validation for this segment entirely, and its episode pool is built in
+    containment mode so no training episode extends past train_end into
+    test data (see _build_sample_pool).
+
     Returns list of dicts with keys:
         train_start, train_end, valid_start, valid_end
+        (valid_start/valid_end are None for the backtest-prep segment)
     """
     test_start_year = data_end_year - test_years + 1
     first_valid_year = data_start_year + initial_train_years
@@ -242,17 +268,36 @@ def generate_walk_forward_folds(
         })
         valid_year += 1
 
+    if for_backtest:
+        # Backtest-prep segment: train through the last non-test year with
+        # no validation. valid_start/valid_end = None is the sentinel the
+        # trainer keys on to (a) skip all validation and (b) build the
+        # episode pool in containment mode.
+        folds.append({
+            "train_start": date(data_start_year, 1, 1),
+            "train_end": date(test_start_year - 1, 12, 31),
+            "valid_start": None,
+            "valid_end": None,
+        })
+
     if logger:
         logger.info(
             f"Generated {len(folds)} walk-forward folds "
             f"(initial_train={initial_train_years}y, valid={valid_years}y, "
-            f"test={test_years}y holdout at {test_start_year}-{data_end_year})"
+            f"test={test_years}y holdout at {test_start_year}-{data_end_year}"
+            f"{', +backtest-prep segment' if for_backtest else ''})"
         )
         for i, f in enumerate(folds, 1):
-            logger.info(
-                f"  Fold {i:2d}: Train {f['train_start']} → {f['train_end']} | "
-                f"Valid {f['valid_start']} → {f['valid_end']}"
-            )
+            if f["valid_start"] is None:
+                logger.info(
+                    f"  Fold {i:2d}: Train {f['train_start']} → {f['train_end']} | "
+                    f"BACKTEST PREP — no validation, episodes contained ≤ train_end"
+                )
+            else:
+                logger.info(
+                    f"  Fold {i:2d}: Train {f['train_start']} → {f['train_end']} | "
+                    f"Valid {f['valid_start']} → {f['valid_end']}"
+                )
 
     return folds
 
@@ -298,7 +343,7 @@ class DailyTrainer:
         # but main() always passes the computed values.
         basket_first_valid_idx: int = 0,
         basket_last_valid_idx: Optional[int] = None,
-        episode_days: int = 252,
+        episode_days: int = DAYS_PER_EPISODE,
         batch_size: int = BATCH_SIZE,
         num_episodes_per_fold: int = NUM_EPISODES,
         valid_interval: int = VALID_INTERVAL,
@@ -411,10 +456,20 @@ class DailyTrainer:
         self,
         start_date: date,
         end_date: date,
+        contain: bool = False,
     ) -> List[Tuple[int, float]]:
         """
         Build a list of (start_idx, weight) for episode sampling, restricted
         to episodes that START within [start_date, end_date].
+
+        contain=True additionally requires the episode to END within the
+        window: the episode's last bar (start_idx + episode_days - 1) must
+        fall on or before end_date. Normal folds run with contain=False —
+        their late-window episodes overrun into the fold's own validation
+        year, which is long-standing v6-inherited behavior. The backtest-
+        prep segment MUST run with contain=True, because there the next
+        bars past train_end are the test holdout, and an overrun would be
+        training on test data.
 
         v7: basket is fixed (no per-ticker dim). All basket members are
         aligned on the same NYSE trading-day timeline so a single start_idx
@@ -452,6 +507,16 @@ class DailyTrainer:
             )
             if ts_date < start_date or ts_date > end_date:
                 continue
+            if contain:
+                # Episode's last bar must not pass end_date. Indexing is
+                # safe: hi guarantees start_idx + episode_days - 1 is within
+                # the valid data range.
+                end_ts = self.timestamps[start_idx + self.episode_days - 1]
+                ep_end_date = end_ts.astype('datetime64[D]').astype(date) if hasattr(end_ts, 'astype') else (
+                    end_ts.date() if hasattr(end_ts, 'date') else end_ts
+                )
+                if ep_end_date > end_date:
+                    continue
             pool.append((start_idx, 0.0))
 
         if not pool:
@@ -714,18 +779,38 @@ class DailyTrainer:
         valid_start = fold["valid_start"]
         valid_end = fold["valid_end"]
 
+        # Backtest-prep segment (generate_walk_forward_folds for_backtest=True):
+        # valid_start is None. No validation runs, and the train pool is
+        # built in containment mode so no episode extends past train_end —
+        # the bars after train_end are the test holdout.
+        is_backtest_segment = valid_start is None
+
         if self.logger:
-            self.logger.info(
-                f"\n{'='*60}\n"
-                f"Fold {fold_idx + 1}: "
-                f"Train {train_start} → {train_end} | "
-                f"Valid {valid_start} → {valid_end}\n"
-                f"{'='*60}"
-            )
+            if is_backtest_segment:
+                self.logger.info(
+                    f"\n{'='*60}\n"
+                    f"Fold {fold_idx + 1} (BACKTEST PREP): "
+                    f"Train {train_start} → {train_end} | "
+                    f"no validation, episodes contained ≤ train_end\n"
+                    f"{'='*60}"
+                )
+            else:
+                self.logger.info(
+                    f"\n{'='*60}\n"
+                    f"Fold {fold_idx + 1}: "
+                    f"Train {train_start} → {train_end} | "
+                    f"Valid {valid_start} → {valid_end}\n"
+                    f"{'='*60}"
+                )
 
         # Build sample pools for this fold's time boundaries (basket-wide).
-        train_pool = self._build_sample_pool(train_start, train_end)
-        valid_pool = self._build_sample_pool(valid_start, valid_end)
+        train_pool = self._build_sample_pool(
+            train_start, train_end, contain=is_backtest_segment,
+        )
+        valid_pool = (
+            [] if is_backtest_segment
+            else self._build_sample_pool(valid_start, valid_end)
+        )
 
         # Sample a fixed validation set once per fold — reused across all
         # _run_validation calls in this fold for clean learning curves.
@@ -1010,10 +1095,17 @@ class DailyTrainer:
 
         # Final model checkpoint — guarantees an end-of-training weights
         # file exists regardless of whether the last episode landed on a
-        # save_interval boundary.
+        # save_interval boundary. If the run ended on a backtest-prep
+        # segment (for_backtest=True), the prefix says so — this is the
+        # artifact the backtester should be pointed at.
+        final_prefix = (
+            "daily_final_backtest_"
+            if folds and folds[-1].get("valid_start") is None
+            else "daily_final_"
+        )
         self.agent.save_model(
             save_dir=self.models_dir,
-            prefix="daily_final_",
+            prefix=final_prefix,
             timestamp=timestamp,
         )
         if self.logger:
@@ -1580,6 +1672,7 @@ def main():
         initial_train_years=INITIAL_TRAIN_YEARS,
         valid_years=VALID_YEARS,
         test_years=TEST_YEARS,
+        for_backtest=FOR_BACKTEST,
         logger=logger,
     )
 
@@ -1620,7 +1713,7 @@ def main():
         portfolio_state_len=portfolio_state_len,
         action_dim=n_tickers,
         capacity=200_000,
-        decay=3.0,          # v6 default; planned v7 decay sweep before run-1 MC
+        decay=0,          # v6 default; planned v7 decay sweep before run-1 MC
     )
 
     agent = Agent(
