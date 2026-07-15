@@ -84,7 +84,7 @@ from src.utils.logger import Logger
 
 # load_tickers_from_unified and _build_basket_inputs are reused from the
 # trainer so the backtest's data / observation path is byte-identical to
-# training's. Adjust this import if trainer.py lives elsewhere in your tree.
+# training's.
 from src.v7.training.trainer import load_tickers_from_unified, _build_basket_inputs
 
 
