@@ -26,9 +26,11 @@ first lever in five swings to move the cliffs in a seed-consistent
 direction (4→5 −26%, 6→7 −29%, 3/3 seeds); Run 6 (decay-1.5 mid-point MC)
 found no knee — the robustness/mean tradeoff is linear in decay — and
 **uniform (decay 0) is locked as the go-forward baseline** (te=+3, no
-regime feature, uniform buffer). Next: retrain the locked config with the
-2023 validation year folded into training, then the one-shot 2024–25
-backtest. After that: regime-balanced sampling.
+regime feature, uniform buffer). Next: 3-seed FOR_BACKTEST retrain of the
+locked config, then the one-shot 2024–25 backtest — protocol pre-registered
+in the "Backtest" section (headline: annual-reset mirroring the training
+episode structure; success criterion locked 2026-07-13). After that:
+regime-balanced sampling.
 
 ## Why this is the right pivot
 
@@ -687,8 +689,7 @@ te=+3. The result tracked the pre-registered most-likely outcome
 (monotonic interpolation) cleanly enough that the remaining 2 seeds
 were called off.
 
-**Seeds & Runs:**
-- seed 42 = run 11
+**Seed 42 only (te=+2): run 11.** Seeds 43/44 NOT RUN.
 
 **Same-seed gradient (seed 42 across all 4 configs):**
 
@@ -1319,6 +1320,186 @@ in this dev log under standard `## Run N — [name] ([VERDICT])` headers.
 
 ---
 
+## Backtest — protocol (PRE-REGISTERED)
+
+All backtest-related decisions live here. Written BEFORE any retrained
+model has been backtested. The success criterion below was locked
+2026-07-13, before any retrained model was backtested.
+
+**Model under test.** 3-seed FOR_BACKTEST retrain of the locked config
+(te=+3, no regime feature, uniform buffer decay=0): the standard 9-fold
+walk-forward runs unchanged, then one validation-less segment folds 2023
+into training — its episode pool is containment-constrained, so training
+never touches a test-window bar. Artifact: `daily_final_backtest_<ts>`,
+one per seed {42, 43, 44}. **All three seeds are backtested and all three
+are reported — no seed selection.** The result is the cross-seed picture;
+single-seed numbers are draws.
+
+**Test window.** The final TEST_YEARS calendar years (2024-01-01 →
+2025-12-31 per config, ~502 bars). Never used for training, validation,
+or any accept/reject decision. One shot per seed: the numbers get written
+once, whatever they say.
+
+**Protocols (both run in a single backtester invocation per model).**
+- HEADLINE — `annual_reset`: consecutive 252-day episodes mirroring the
+  training protocol exactly (TRAIN_EPISODE_DAYS in backtester.py must
+  mirror training's episode_days; the final segment takes the window's
+  remainder where it is not an exact 252-multiple — shorter than trained
+  is within-distribution). Each episode's final step liquidates to
+  cash; the next starts from 100% cash on that bar; PV compounds across
+  the boundary. The boundary round-trip's exit + re-entry costs are
+  charged — the real price of the system's real protocol. This is "the
+  system as built, deployed as designed." (Rationale: episode structure
+  incl. terminal liquidation is part of the system, not a training
+  artifact to test despite; episode-2-from-cash is fully in-distribution
+  since every training episode starts there.)
+- SECONDARY — `continuous`: one single episode over the whole window. The
+  policy never trained past 252 days, so episode-length-dependent
+  portfolio-state components (hold_time, the compounding total-value
+  scalar) drift out-of-distribution in the back half.
+- **The HEADLINE−SECONDARY gap is itself a pre-registered measurement:**
+  large gap ⇒ episode-length drift is real and continuous deployment would
+  degrade this model (Prometheus-2.0 note: variable-length training
+  episodes); ~zero gap ⇒ continuous deployment is safe.
+
+**Benchmark.** Frictionless equal-weight buy-once-hold of the 5-ETF basket
+over the same window. Deliberately friction-free (the model pays full
+costs; the benchmark pays none) — the comparison is conservative against
+the model.
+
+**Statistical resolution.** SE(annualized Sharpe) ≈ sqrt((1 + SR²/2) / T)
+≈ ±0.85 at SR≈1 over T=2 years. This backtest distinguishes "roughly
+works" from "roughly doesn't" — it cannot distinguish 0.7 from 1.1. The
+criterion below must respect that resolution.
+
+**Success criterion (PRE-REGISTERED, locked 2026-07-13 — before any
+`daily_final_backtest_` model was backtested):**
+
+> **Success** = the locked model beats the frictionless equal-weight
+> buy-and-hold benchmark on the held-out window, judged on the HEADLINE
+> (annual-reset) protocol as: **3-seed mean Sharpe > B&H Sharpe**.
+> Secondary readouts (reported, not gating): total return, max drawdown,
+> and the per-seed count beating B&H. **Ambiguity clause:** given
+> SE(Sharpe) ≈ ±0.8 at 2 years, a 3-seed mean within ±0.3 of B&H is
+> recorded as *indistinguishable from passive — no evidence of edge*, not
+> a win; a mean Sharpe > 0 but below B&H is recorded as *profitable
+> beta-slice, no edge over passive*. All three seeds' numbers go in the
+> log regardless of outcome.
+
+**Known caveats carried into the read (disclosed in advance):**
+1. Validation selection pressure: ~6 accept/reject decisions were made on
+   the same 9 validation years across Runs 1–6, so the locked config's
+   validation numbers are optimistically biased. Expect the backtest to
+   land below what validation implies; measuring that gap is part of what
+   the backtest is for.
+2. Fold-9 validation keyhole: fold-9 validation episodes (starts sampled
+   across 2023, 252 days long) extend into 2024 — on average about half a
+   year deep, with the latest 2023 starts reaching near end-2024 — so
+   run-level comparisons had a thin view of early test data. The leak was
+   identical
+   for every compared arm (A-vs-B decisions unaffected) and the deployed
+   artifact is the final model, not a validation-selected checkpoint.
+   Disclosed, not retro-fixed. Corollary: `fold_9_best` checkpoints must
+   never be presented as clean OOS.
+3. Episode-boundary discreteness: the annual-reset boundary lands at bar
+   252 regardless of market conditions; the strategy as designed accepts
+   that forced round-trip.
+
+**Tooling.** `backtester.py` runs both protocols + benchmark in one
+invocation (combined 3-column table, protocol-gap line, one plot with the
+reset boundary marked; per-model output dir with log + PNG). Trainer's
+`FOR_BACKTEST=True` produces the artifact (+1 fold's episodes, ~+11%
+runtime per seed).
+
+### Backtest — RESULT (2026-07-15): does NOT beat buy-and-hold; "profitable beta-slice, no edge over passive"
+
+Executed as pre-registered. 3-seed FOR_BACKTEST retrain of the locked
+config (uniform decay=0, te=+3, no regime feature), 2023 folded into
+training via the containment-constrained validation-less segment.
+Registered window 2024-01-02 → 2025-12-31 (502 bars, one 252-day annual
+reset). All three seeds backtested and reported, no selection. One shot.
+
+**Seeds & runs:** seed 42 = run 21, seed 43 = run 22, seed 44 = run 23.
+(Same three `daily_final_backtest_` artifacts are reused for the extended
+readout below — run numbers there are the extended re-invocations of the
+same models, not new training.)
+
+Headline protocol (annual_reset), per seed:
+
+| seed | model artifact | total return | annual | Sharpe | Sortino | Calmar | maxDD |
+|------|----------------|-------------:|-------:|-------:|--------:|-------:|------:|
+| 42 | `daily_final_backtest_..._20260714_063900` | +13.20% | +6.43% | 0.599 | 0.873 | 0.929 | 6.93% |
+| 43 | `daily_final_backtest_..._20260714_185212` | +10.03% | +4.93% | 0.411 | 0.565 | 0.561 | 8.78% |
+| 44 | `daily_final_backtest_..._20260715_060108` | +12.78% | +6.24% | 0.550 | 0.807 | 0.716 | 8.71% |
+| **mean** | | **+12.00%** | **+5.87%** | **0.520** | 0.748 | 0.735 | 8.14% |
+| B&H (eq-wt, frictionless) | | +28.96% | +13.65% | **1.227** | 1.821 | 1.696 | 8.05% |
+
+**Criterion evaluation (verbatim against the locked rule):** success =
+3-seed mean Sharpe (annual-reset) > B&H Sharpe. Result: **0.520 vs
+1.227 — FAIL.** The gap (−0.707) is >2× the ±0.3 ambiguity band, so this
+is not the "indistinguishable" case; and mean Sharpe > 0, so by the
+pre-registered ambiguity clause the outcome is recorded as **"profitable
+beta-slice, no edge over passive"** — the model makes money on every seed
+(mean +12.0%, 0/3 seeds beat B&H, worst seed still +10.0%) but carries no
+risk-adjusted edge over simply holding the basket. maxDD is on par with
+B&H (8.1% vs 8.0%), so the shortfall is a return deficit at matched risk,
+not a risk reduction — the model captures roughly 40–45% of the basket's
+return for essentially the same drawdown.
+
+Secondary protocol (continuous), 3-seed mean Sharpe 0.563 — **protocol
+gap +0.043 (headline − secondary is negative: continuous edges headline
+by ~0.04–0.05 Sharpe on all three seeds).** Per the pre-registered
+reading, a ~zero gap means episode-length drift is negligible and
+continuous deployment would not degrade this model — the annual reset's
+boundary round-trip cost slightly *lowers* the headline, which is the
+expected sign. The OOD portfolio-state drift worried about at build time
+did not materially bite over this window.
+
+Interpretation. Consistent with the validation-era diagnosis and every
+disclosed caveat: the model learned a real but conservative
+lower-volatility allocation that trails a strong 2024–25 basket beta.
+Cross-seed spread is tight (Sharpe 0.41–0.60), so the result is stable,
+not a seed artifact. This is the founding question answered cleanly and
+in the negative — an SAC allocator over this 5-ETF basket does not beat
+equal-weight buy-and-hold on risk-adjusted terms at this data scale. The
+value of the result is its rigor: pre-registered criterion, three seeds,
+one shot, no post-hoc window or metric shopping.
+
+#### Supplementary readout — extended window (NON-GATING, does not affect the verdict)
+
+Not part of the pre-registered test; the criterion above stands on the
+502-bar registered window alone. Reported because the extra quarter
+postdates every decision in the project and is the cleanest out-of-time
+data available. Same three models (runs 21/22/23), re-invoked on
+2024-01-02 → 2026-04-24 (580 bars, two 252-day annual resets + remainder).
+This window was NOT promoted to gating status precisely because a void
+pre-retrain smoke test had already shown it favorable before these runs —
+promoting it after that peek would be window selection.
+
+Headline protocol (annual_reset), extended window:
+
+| seed / run | total return | annual | Sharpe | Sortino | Calmar | maxDD |
+|------------|-------------:|-------:|-------:|--------:|-------:|------:|
+| 42 / run 21 | +28.35% | +11.47% | 1.113 | 1.664 | 1.657 | 6.93% |
+| 43 / run 22 | +22.66% | +9.30% | 0.881 | 1.235 | 1.059 | 8.78% |
+| 44 / run 23 | +26.19% | +10.66% | 1.004 | 1.498 | 1.223 | 8.72% |
+| **mean** | **+25.73%** | **+10.48%** | **0.999** | 1.466 | 1.313 | 8.14% |
+| B&H (eq-wt, frictionless) | +53.66% | +20.56% | **1.595** | 2.355 | 2.554 | 8.05% |
+
+**Same conclusion, unchanged.** Extended mean Sharpe 0.999 vs B&H 1.595 —
+gap −0.596, 0/3 seeds beat B&H, ~48% return capture at matched drawdown
+(8.1% vs 8.0%): still "profitable beta-slice, no edge over passive." The
+extra Q1-2026 leg was a strong basket rally that lifted BOTH model and
+benchmark (B&H Sharpe rose 1.23 → 1.60; model rose 0.52 → 1.00), so the
+absolute numbers are higher but the relationship is identical. Seed
+ranking is preserved (42 > 44 > 43 in both windows), confirming stability.
+Continuous mean Sharpe 1.031 (protocol gap −0.032, negative on all three
+seeds) — same negligible episode-length drift as the registered window.
+Nothing here changes the pre-registered verdict; it corroborates it on
+out-of-time data.
+
+---
+
 ## Where things stand (Run 6 — decay locked; retrain + backtest next)
 
 **The one open problem is the cross-fold cliffs.** Everything else in v7
@@ -1348,11 +1529,11 @@ coverage tool, reuses the Run-4 label), then FiLM/MoE if coverage tops
 out. The honest possibility that the residual cliff is near-irreducible
 for a 5-fixed-ticker walk-forward still stands.
 
-**Current path (locked):** retrain the uniform (decay 0, te=+3) config
-with the 2023 validation year folded into training (closing the
-train/test gap) → one-shot 2024–25 backtest → then regime-balanced
-sampling → mechanism. Backtesting remains deferred until that retrain; no
-OOS numbers are on the record. Same single-seed-scout-then-3-seed-MC
-discipline throughout.
+**Current path (locked):** 3-seed FOR_BACKTEST retrain of the uniform
+(decay 0, te=+3) config → one-shot 2024–25 backtest per the pre-registered
+protocol in the "Backtest" section above (success criterion locked
+2026-07-13) → then regime-balanced sampling → mechanism. No OOS numbers
+are on the record. Same single-seed-scout-then-3-seed-MC discipline
+throughout.
 
 ---
