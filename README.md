@@ -385,4 +385,4 @@ python -m src.v<N>.training.trainer             # train (walk-forward across fol
 python -m src.v<N>.backtesting.backtester       # out-of-sample backtest — v4 and v7 only
 ```
 
-Only **v4 and v7** ship a backtesting module. v4's backtester needs the `model_path` variable set manually to the checkpoint you want to evaluate; v7's picks up the latest saved model automatically unless one is specified. (The `develop` branch holds every version's code merged together, but its config only runs v7 — so check out a version's own branch to run anything earlier.)
+Only **v4 and v7** ship a backtesting module. v4's backtester needs the `model_path` variable set manually to the checkpoint you want to evaluate; v7's picks up the latest saved model automatically unless one is specified. (The project holds every version's code within their directory, but the config only runs v7 — so check out a version's own branch to run anything earlier.)
