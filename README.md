@@ -4,6 +4,8 @@ Project Prometheus is a Soft Actor-Critic (SAC) reinforcement learning agent tha
 
 Prometheus succeeds an earlier project, [Marklygon](https://github.com/markk628/MarklygonAI), a DQN-based stock-trading model. Marklygon was limited to a discrete action space — initially just sell-all / hold / buy-max, later widened to quarter increments (sell 25/50/75/100%, hold, buy 25/50/75/100%) — which made precise position sizing difficult. The switch to SAC was driven by that limitation: a continuous action space lets the agent size trades on a smooth scale rather than snapping to coarse buckets.
 
+> This project was built solo. I used Claude (Anthropic) throughout the project — for statistical analysis, code review, and dev-log and README writing — while the research direction, design decisions, and final calls were my own.
+
 ## Contents
 
 - [Problem](#problem)
@@ -12,6 +14,7 @@ Prometheus succeeds an earlier project, [Marklygon](https://github.com/markk628/
 - [Repository layout](#repository-layout)
 - [Version history](#version-history)
 - [Results](#results)
+- [Lessons learned](#lessons-learned)
 - [Setup & usage](#setup--usage)
 
 ## Problem
@@ -303,6 +306,22 @@ What the project does *not* claim is a profitable, deployable strategy. The best
 The result is unambiguous and stable across seeds: the model makes money — every seed positive, mean +12.0% — but captures under half of what simply holding the basket returned, at the same drawdown (8.1% vs. 8.0%). By the pre-registered criterion, 3-seed mean Sharpe 0.520 versus buy-and-hold's 1.227 is a clear miss — the gap is more than twice the ambiguity band that was defined in advance — and it lands in the criterion's pre-named *"profitable beta-slice, no edge over passive"* outcome. This is the regime-generalization wall the walk-forward cliffs diagnosed, now measured on genuinely unseen data under a criterion fixed beforehand: **v7 does not beat a passive baseline out-of-sample.** The tight cross-seed spread (Sharpe 0.41–0.60) is what makes that a finding rather than a fluke.
 
 The open problem is well-posed and the next levers are identified — regime-conditioned architectures, regime-balanced sampling, and cleaner vendor data — which is where a future Prometheus 2.0 picks up.
+
+## Lessons learned
+
+The methodology was the point, and building it taught more than the trading results did. A few principles that this project drove home — most of them the hard way:
+
+**Clean data is a fairytale.** Even data bought from a vendor has to be audited and cleaned before it is fit to train on. Gaps, splits and dividends, survivorship, bad prints, timestamp misalignment — none of it arrives handled, and every one of them will silently corrupt a model or, worse, leak the future into the past. "Sourced from a reputable provider" is the start of the data work, not the end of it.
+
+**Documentation is not optional, and its absence compounds.** Writing this README meant going back to early versions that had little or no dev log — and having to reverse-engineer my own code to reconstruct what each run did and why. A result you can't explain later is a result you can't build on. The versions with disciplined dev logs (v4-7) were the ones that produced transferable findings; that is not a coincidence.
+
+**Tuning against a backtest turns the backtest into a validation set.** This is the subtle one. The moment you look at an out-of-sample result and change the model in response, that data has been used for selection — it is no longer out-of-sample, and any number it produces afterward is optimistic. The only defense is procedural: pre-register the success criterion and the protocol *before* running the test, report every seed, and take exactly one shot. v7's endgame was built around this — the criterion was fixed in the dev log first, the final model was retrained with the last validation year folded in so nothing selectable remained, and the backtest was run once. The discipline is what makes the negative result trustworthy.
+
+**Non-stationary time series need causal normalization.** Normalizing with statistics computed over the whole series (or any window that peeks forward) leaks future information into past observations — a subtle look-ahead that inflates validation and evaporates in live trading. Rolling, backward-looking normalization that only ever sees data up to the current bar is the honest choice for data whose distribution drifts over time.
+
+**Non-stationary time series need walk-forward validation.** A traditional fixed percentage split only tells you how the model does on that one slice of history — which, for drifting data, is a single regime sample dressed up as a verdict. Expanding-window walk-forward tests the model across many successive regime transitions, which is exactly where these models fail. The fixed split hides the failure mode; walk-forward surfaces it. (It was walk-forward that exposed v7's cross-fold cliffs in the first place — a % split would have averaged them away.)
+
+**Clever feature engineering unlocks data you already have.** This was the lesson I least expected. I started out thinking about features built from *one ticker's* data — its own price, its own volume — when the real gold mine was the rest of the raw data sitting unused. Two moves compounded here. First, training ticker-agnostically across many symbols rather than one at a time lets the agent learn from the whole cross-section of market behavior instead of a single instrument's idiosyncrasies — the difference between forecasting weather from a global view versus one backyard thermometer. Second, and the piece that makes the first one work: *cross-sectional normalization*. A raw value — a price, a dollar volume — only means something relative to the ticker it came from, so it can't teach a model anything general. Re-expressing each feature relative to the cross-section (as a percentile, rank, or z-score across all tickers at that timestamp) turns it into a scale-free, ticker-agnostic quantity that carries the same meaning everywhere — so a feature derived from almost any ticker becomes usable training signal for the whole basket. The daily, cross-sectional pivot (v5) is where the project first found real signal, and this engineering is a large part of why. The model architecture mattered far less than what I fed it.
 
 ## Setup & usage
 
